@@ -1,0 +1,14 @@
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
+shapely==2.1.2
+numba==0.68.0
+# Mini-KI (vom Nutzer am 05.10.2026 freigegeben)
+torch==2.14.1
+mlx==0.32.3
+mlx-lm==0.32.0
+onnxruntime==1.30.0
+ortools==9.15.6755
+optuna==5.0.0
+scikit-learn==1.9.1
+lightgbm==4.7.0   # braucht libomp (brew install libomp); bis dahin scikit-learn HistGradientBoosting verwenden
