@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core dependencies
+        run: pip install numpy scipy shapely numba pillow
+      - name: Router is built from its parts
+        run: cmp router/route_pf.py <(cat router/pf_head.py router/pf_body.py router/pf_main.py)
+        shell: bash
+      - name: Everything compiles
+        run: python -m compileall -q .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v

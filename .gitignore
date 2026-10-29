@@ -10,8 +10,11 @@ __pycache__/
 *.kicad_dru
 *.kicad_mod
 *.json
+!analysis/standard.json
+!analyse/standard.json
 *.jsonl
 *.npz
 *.joblib
 *.png
+!docs/*.png
 results/
