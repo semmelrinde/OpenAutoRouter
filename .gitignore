@@ -1,7 +1,7 @@
 .venv
 __pycache__/
 *.pyc
-oeffentlich_bericht.json
+
 # Never commit board files, results or training data
 *.kicad_pcb
 *.kicad_sch
@@ -14,4 +14,4 @@ oeffentlich_bericht.json
 *.npz
 *.joblib
 *.png
-ergebnisse/
+results/

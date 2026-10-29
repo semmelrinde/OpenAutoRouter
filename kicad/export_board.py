@@ -1,4 +1,8 @@
-""
+"""Export a KiCad board to the JSON format used by the placer and router (run with KiCad's Python).
+
+usage: <kicad-python> kicad/export_board.py <board.kicad_pcb> <board.json>
+Writes pads (with polygons), footprints, courtyards, outline, keepouts, layers and net classes.
+"""
 import pcbnew, sys, json
 import wx
 _app = wx.GetApp() or wx.App(False)
@@ -6,7 +10,7 @@ _log_target = wx.LogStderr()
 _log_previous = wx.Log.SetActiveTarget(_log_target)
 
 src, out = sys.argv[1], sys.argv[2]
-_ausgabekupfer = 'ausgabekupfer=1' in sys.argv[3:]
+_output_copper = 'output_copper=1' in sys.argv[3:]
 b = pcbnew.LoadBoard(src)
 
 
@@ -41,14 +45,14 @@ for f in b.GetFootprints():
         if p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
             p.TransformHoleToPolygon(hole, 0, pcbnew.FromMM(0.001), pcbnew.ERROR_OUTSIDE)
             drill_size = [mm(p.GetDrillSize().x), mm(p.GetDrillSize().y)]
-        maske = {}
+        mask = {}
         for L, ml in (('F', pcbnew.F_Mask), ('B', pcbnew.B_Mask)):
             if L in polys and p.IsOnLayer(ml):
                 try:
                     e = mm(p.GetSolderMaskExpansion(ml))
-                    maske[L] = round(e, 4)
+                    mask[L] = round(e, 4)
                 except Exception: pass
-        pads.append(dict(ref=f.GetReference(), num=p.GetNumber(), net=p.GetNetname(), layers=lays, polys=polys, maske=maske,
+        pads.append(dict(ref=f.GetReference(), num=p.GetNumber(), net=p.GetNetname(), layers=lays, polys=polys, mask=mask,
                          padstack_complete=True, hole_polys=poly_pts(hole), drill_size=drill_size,
                          dru_pad_type={pcbnew.PAD_ATTRIB_PTH:'Through-hole',pcbnew.PAD_ATTRIB_SMD:'SMD',pcbnew.PAD_ATTRIB_CONN:'Edge connector',pcbnew.PAD_ATTRIB_NPTH:'NPTH, mechanical'}[p.GetAttribute()],
                          pad_type='npth' if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH else 'pth' if p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH else 'smd',
@@ -58,7 +62,7 @@ for f in b.GetFootprints():
                          fp_side='B' if f.IsFlipped() else 'F',
                          pinfunc=p.GetPinFunction(), pintype=p.GetPinType()))
 
-via_sperre = []
+via_keepout = []
 for f in b.GetFootprints():
     ref = f.GetReference()
     if not (f.IsNetTie() or ref.startswith('NT_')): continue
@@ -66,7 +70,7 @@ for f in b.GetFootprints():
         L = g.GetLayer()
         if L not in (pcbnew.F_Cu, pcbnew.B_Cu): continue
         sps = pcbnew.SHAPE_POLY_SET(); g.TransformShapeToPolygon(sps, L, 0, pcbnew.FromMM(0.005), pcbnew.ERROR_OUTSIDE)
-        via_sperre.append(dict(ref=ref, polys=poly_pts(sps)))
+        via_keepout.append(dict(ref=ref, polys=poly_pts(sps)))
         for pq in f.Pads():
             if not pq.IsOnLayer(L): continue
             c = pcbnew.SHAPE_POLY_SET(); pq.TransformShapeToPolygon(c, L, pcbnew.FromMM(0.01), pcbnew.FromMM(0.005), pcbnew.ERROR_OUTSIDE)
@@ -81,7 +85,7 @@ for f in b.GetFootprints():
 
 _cu = list(b.GetEnabledLayers().CuStack()); cu_ids = set(_cu)
 cu_name = {lid: ('F' if i == 0 else 'B' if i == len(_cu) - 1 else 'In%d' % i) for i, lid in enumerate(_cu)}
-kupfer_grafik = []
+copper_graphic = []
 for k_, d in enumerate(b.GetDrawings()):
     L = d.GetLayer()
     if not pcbnew.IsCopperLayer(L) or L not in cu_ids: continue
@@ -92,11 +96,11 @@ for k_, d in enumerate(b.GetDrawings()):
     if not sps.OutlineCount(): continue
     side = cu_name[L]; bb = sps.BBox()
     if not bb.Intersects(b.GetBoardEdgesBoundingBox()): continue
-    try: netz = d.GetNetname() if hasattr(d, 'GetNetname') else ''
-    except Exception: netz = ''
-    kupfer_grafik.append(dict(layer=side, net=netz, polys=poly_pts(sps)))
-    pads.append(dict(ref='CU_%d' % k_, num='1', net=(netz or '#CU_%d' % k_) if _ausgabekupfer else '#CU_%d' % k_,
-                     **({'board_copper': True, 'native_uuid': str(d.m_Uuid.AsString())} if _ausgabekupfer else {}), layers=[side], polys={side: poly_pts(sps)},
+    try: net_name = d.GetNetname() if hasattr(d, 'GetNetName') else ''
+    except Exception: net_name = ''
+    copper_graphic.append(dict(layer=side, net=net_name, polys=poly_pts(sps)))
+    pads.append(dict(ref='CU_%d' % k_, num='1', net=(net_name or '#CU_%d' % k_) if _output_copper else '#CU_%d' % k_,
+                     **({'board_copper': True, 'native_uuid': str(d.m_Uuid.AsString())} if _output_copper else {}), layers=[side], polys={side: poly_pts(sps)},
                      x=mm(bb.Centre().x), y=mm(bb.Centre().y), bbox=[mm(bb.GetX()), mm(bb.GetY()), mm(bb.GetRight()), mm(bb.GetBottom())],
                      drill=0.0, fp_side=side, pinfunc='', pintype=''))
 
@@ -110,7 +114,7 @@ for f in b.GetFootprints():
         if not sps.OutlineCount(): continue
         side = cu_name[g.GetLayer()]; bb = sps.BBox()
         footprint_copper.append(dict(ref=f.GetReference(), num='#CU%d' % gi, net='#FPCU_%s_%d' % (f.GetReference(), gi),
-                         layers=[side], polys={side: poly_pts(sps)}, maske={}, graphic=True,
+                         layers=[side], polys={side: poly_pts(sps)}, mask={}, graphic=True,
                          x=mm(bb.Centre().x), y=mm(bb.Centre().y),
                          bbox=[mm(bb.GetX()), mm(bb.GetY()), mm(bb.GetRight()), mm(bb.GetBottom())],
                          drill=0.0, fp_side='B' if f.IsFlipped() else 'F', pinfunc='', pintype=''))
@@ -126,7 +130,7 @@ for f, graphics in [(f, f.GraphicalItems()) for f in b.GetFootprints()] + [(None
         bb = sps.BBox(); side = 'F' if g.GetLayer() == pcbnew.F_Mask else 'B'
         ref = f.GetReference() if f else '#BOARD_MASK'
         mask_graphics.append(dict(ref=ref, num='#MASK%d' % gi, net='#MASK_%s_%d' % (ref, gi),
-                                  layers=[side], polys={side: poly_pts(sps)}, maske={}, graphic=True,
+                                  layers=[side], polys={side: poly_pts(sps)}, mask={}, graphic=True,
                                   x=mm(bb.Centre().x), y=mm(bb.Centre().y),
                                   bbox=[mm(bb.GetX()), mm(bb.GetY()), mm(bb.GetRight()), mm(bb.GetBottom())],
                                   drill=0.0, fp_side='B' if f and f.IsFlipped() else 'F', pinfunc='', pintype=''))
@@ -144,29 +148,29 @@ for f in b.GetFootprints():
         if cy.OutlineCount():
             crt.append(dict(ref=f.GetReference(), side=side, polys=poly_pts(cy)))
 
-def regelbereich(z, ref):
+def rule_range(z, ref):
     vb = {}
-    for k_, f_ in (('bahnen', 'GetDoNotAllowTracks'), ('vias', 'GetDoNotAllowVias'), ('pads', 'GetDoNotAllowPads'),
-                   ('flaechen', 'GetDoNotAllowZoneFills'), ('flaechen', 'GetDoNotAllowCopperPour'), ('teile', 'GetDoNotAllowFootprints')):
+    for k_, f_ in (('track_list', 'GetDoNotAllowTracks'), ('vias', 'GetDoNotAllowVias'), ('pads', 'GetDoNotAllowPads'),
+                   ('areas', 'GetDoNotAllowZoneFills'), ('areas', 'GetDoNotAllowCopperPour'), ('part_list', 'GetDoNotAllowFootprints')):
         if k_ in vb: continue
         try: vb[k_] = bool(getattr(z, f_)())
         except Exception: pass
-    try: lagen = [cu_name[l] for l in z.GetLayerSet().Seq() if l in cu_name]
-    except Exception: lagen = []
+    try: cu_layers = [cu_name[l] for l in z.GetLayerSet().Seq() if l in cu_name]
+    except Exception: cu_layers = []
     o = z.Outline()
     lo = [[[(mm(h.CPoint(k).x), mm(h.CPoint(k).y)) for k in range(h.PointCount())] for h in (o.Hole(i, j) for j in range(o.HoleCount(i)))]
           for i in range(o.OutlineCount())]
 
-    return dict(ref=ref, name=z.GetZoneName(), polys=poly_pts(o), lagen=lagen, verbote=vb, **({'loecher': lo} if any(lo) else {}))
+    return dict(ref=ref, name=z.GetZoneName(), polys=poly_pts(o), cu_layers=cu_layers, prohibitions=vb, **({'hole_list': lo} if any(lo) else {}))
 keepouts = []
 for f in b.GetFootprints():
     for z in f.Zones():
-        if z.GetIsRuleArea(): keepouts.append(regelbereich(z, f.GetReference()))
+        if z.GetIsRuleArea(): keepouts.append(rule_range(z, f.GetReference()))
 for z in b.Zones():
-    if z.GetIsRuleArea(): keepouts.append(regelbereich(z, ''))
+    if z.GetIsRuleArea(): keepouts.append(rule_range(z, ''))
 def attr(f):
     a = f.GetAttributes()
-    return 'smd' if a & pcbnew.FP_SMD else ('tht' if a & pcbnew.FP_THROUGH_HOLE else 'keine')
+    return 'smd' if a & pcbnew.FP_SMD else ('tht' if a & pcbnew.FP_THROUGH_HOLE else 'no')
 
 
 def net_tie_groups(f):
@@ -191,20 +195,20 @@ ds = b.GetDesignSettings()
 def _mm(a):
     try: return round(mm(getattr(ds, a)), 4)
     except Exception: return None
-design = dict(min_breite=_mm('m_TrackMinWidth'), min_abstand=_mm('m_MinClearance'), rand=_mm('m_CopperEdgeClearance'),
-              via_min=_mm('m_ViasMinSize'), bohr_min=_mm('m_MinThroughDrill'), ring_min=_mm('m_ViasMinAnnularWidth'),
-              loch_loch=_mm('m_HoleToHoleMin'), loch_abstand=_mm('m_HoleClearance'), maske=_mm('m_SolderMaskExpansion'),
-              maske_steg=_mm('m_SolderMaskMinWidth'))
+design = dict(min_width=_mm('m_TrackMinWidth'), min_spacing=_mm('m_MinClearance'), border=_mm('m_CopperEdgeClearance'),
+              via_min=_mm('m_ViasMinSize'), bore_min=_mm('m_MinThroughDrill'), ring_min=_mm('m_ViasMinAnnularWidth'),
+              hole_hole=_mm('m_HoleToHoleMin'), hole_spacing=_mm('m_HoleClearance'), mask=_mm('m_SolderMaskExpansion'),
+              mask_web=_mm('m_SolderMaskMinWidth'))
 def _nc(nc):
     d = {}
     for k, f in (('clr', 'GetClearance'), ('w', 'GetTrackWidth'), ('via_d', 'GetViaDiameter'), ('via_b', 'GetViaDrill')):
         try: d[k] = round(mm(getattr(nc, f)()), 4)
         except Exception: pass
     return d
-klassen_def = {}
+netclasses_def = {}
 try:
-    ns = ds.m_NetSettings; klassen_def['Default'] = _nc(ns.GetDefaultNetclass())
-    for k, v in ns.GetNetclasses().items(): klassen_def[str(k)] = _nc(v)
+    ns = ds.m_NetSettings; netclasses_def['Default'] = _nc(ns.GetDefaultNetclass())
+    for k, v in ns.GetNetclasses().items(): netclasses_def[str(k)] = _nc(v)
 except Exception: pass
 
 netclass_effective = {}
@@ -219,8 +223,8 @@ kw = dict(a.split('=', 1) for a in sys.argv[3:] if '=' in a)
 p3 = {}
 if 'placement' in kw:
     placement = json.load(open(kw['placement']))
-    if 'p3_pin_gruppen' in placement: p3['p3_pin_gruppen'] = placement['p3_pin_gruppen']
-json.dump(dict(**p3, src=src, pads=pads, footprint_copper=footprint_copper, mask_graphics=mask_graphics, outline=outline, outline_holes=outline_holes, courtyards=crt, keepouts=keepouts, fps=fps, via_sperre=via_sperre,
-               nets=sorted({p['net'] for p in pads}), netclass=netclass, netclass_effective=netclass_effective, netzklassen=klassen_def, design=design, kupfer_grafik=kupfer_grafik,
-               lagen=b.GetCopperLayerCount()), open(out, 'w'))
-print('Pads', len(pads), 'Netze', len({p['net'] for p in pads}), 'Umriss-Punkte', sum(len(o) for o in outline))
+    if 'p3_pin_groups' in placement: p3['p3_pin_groups'] = placement['p3_pin_groups']
+json.dump(dict(**p3, src=src, pads=pads, footprint_copper=footprint_copper, mask_graphics=mask_graphics, outline=outline, outline_holes=outline_holes, courtyards=crt, keepouts=keepouts, fps=fps, via_keepout=via_keepout,
+               nets=sorted({p['net'] for p in pads}), netclass=netclass, netclass_effective=netclass_effective, net_classes=netclasses_def, design=design, copper_graphic=copper_graphic,
+               cu_layers=b.GetCopperLayerCount()), open(out, 'w'))
+print('Pads', len(pads), 'Nets', len({p['net'] for p in pads}), 'Contour-Points', sum(len(o) for o in outline))

@@ -1,52 +1,51 @@
-""
 import pcbnew, sys, json
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from kicad.kicad_schutz import aktivieren
-aktivieren()
-from gemeinsam.bahnitems import validate
+from kicad.kicad_protection import activate
+activate()
+from common.track_items import validate
 import wx
 APP = wx.GetApp() or wx.App(False)
-_log_ziel = wx.LogStderr(); wx.Log.SetActiveTarget(_log_ziel)
-from projekt_kopie import regeln_sichern, regeln_kopieren, regeln_ziel_leeren
+_log_goal = wx.LogStderr(); wx.Log.SetActiveTarget(_log_goal)
+from project_copy import design_rules_save, design_rules_copy, design_rules_goal_clear
 base, rj, zj, out = sys.argv[1:5]
-_regeln = regeln_sichern(base)
-_projekt_pruefen = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('projekt') == '1'
-if _projekt_pruefen:
+_design_rules = design_rules_save(base)
+_project_verify = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('project') == '1'
+if _project_verify:
 
 
     _manager = pcbnew.GetSettingsManager()
     _pro = str(Path(base).resolve().with_suffix('.kicad_pro'))
     _project = _manager.GetProject(_pro)
     if _project is None:
-        if not _manager.LoadProject(_pro): raise ValueError('Projekt nicht ladbar: ' + _pro)
+        if not _manager.LoadProject(_pro): raise ValueError('Project cannot be loaded: ' + _pro)
         _project = _manager.GetProject(_pro)
-    if _project is None: raise ValueError('Geladenes Projekt fehlt: ' + _pro)
+    if _project is None: raise ValueError('Loaded project missing: ' + _pro)
 b = pcbnew.LoadBoard(base)
-if b is None: raise ValueError('KiCad-Grundplatine nicht lesbar: '+base)
-if _projekt_pruefen:
+if b is None: raise ValueError('KiCad base board not readable: '+base)
+if _project_verify:
 
-    if b.GetProject() is None: raise ValueError('Projekt der Grundplatine fehlt: ' + _pro)
+    if b.GetProject() is None: raise ValueError('Project of the base board missing: ' + _pro)
     b.SynchronizeNetsAndNetClasses(False)
-NLAG = int(dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('lagen', '0'))
-if NLAG: b.SetCopperLayerCount(NLAG)
+NLAY = int(dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('cu_layers', '0'))
+if NLAY: b.SetCopperLayerCount(NLAY)
 ZCLR = float(dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('zclr', '0.2'))
 VD, VDR = [float(q) for q in dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('via', '0.45/0.20').split('/')]
 R = json.load(open(rj)); Z = json.load(open(zj))
 if R.get('rest_board'):
-    from kicad.rest_platzierung import native_platzierung
-    native_platzierung(b, R, pcbnew)
+    from kicad.rest_placement import native_placement
+    native_placement(b, R, pcbnew)
 
 
 zone_keys = {json.dumps(z, sort_keys=True) for z in Z}
 for z in R.get('zones', []):
-    if (z.get('kupferbalken') or z.get('r36')) and json.dumps(z, sort_keys=True) not in zone_keys:
+    if (z.get('copper_bars') or z.get('r36')) and json.dumps(z, sort_keys=True) not in zone_keys:
         Z.append(z)
         zone_keys.add(json.dumps(z, sort_keys=True))
 LAY = {'F': pcbnew.F_Cu, 'B': pcbnew.B_Cu}
 LAY.update({'In%d' % k: getattr(pcbnew, 'In%d_Cu' % k) for k in range(1, 31)})
-EXPORT_NM = (R.get('optionen') or {}).get('export_nm', '0')
-if EXPORT_NM not in ('0', '1'): raise ValueError('export_nm muss 0 oder 1 sein')
+EXPORT_NM = (R.get('options') or {}).get('export_nm', '0')
+if EXPORT_NM not in ('0', '1'): raise ValueError('export_nm must be 0 or 1')
 def MM(v):
 
 
@@ -54,14 +53,14 @@ def MM(v):
 def V(x, y): return pcbnew.VECTOR2I(MM(x), MM(y))
 
 
-ALT = list(b.GetTracks()) + [z for z in b.Zones() if not z.GetIsRuleArea()]
+PREV = list(b.GetTracks()) + [z for z in b.Zones() if not z.GetIsRuleArea()]
 nets = {}
 def net(n):
     if n not in nets: nets[n] = b.FindNet(n)
     return nets[n]
 
 for t in R['tracks']:
-    validate(t,error=float((R.get('organisch_nachlauf') or {}).get('sehnenfehler_mm',.00025)))
+    validate(t,error=float((R.get('organic_post_run') or {}).get('chord_error_mm',.00025)))
 ns = na = 0
 for t in R['tracks']:
     if 'items' in t:
@@ -80,7 +79,7 @@ for t in R['tracks']:
         if abs(a[0] - c[0]) < 1e-6 and abs(a[1] - c[1]) < 1e-6: continue
         s = pcbnew.PCB_TRACK(b); s.SetStart(V(*a)); s.SetEnd(V(*c)); s.SetWidth(MM(w)); s.SetLayer(LAY[t['layer']]); s.SetNet(net(t['net'])); b.Add(s); ns += 1
 for v in R['vias']:
-    vd, vdr = (v['d'], v['drill']) if R.get('native_vias') or v.get('kupferbalken') else (VD, VDR)
+    vd, vdr = (v['d'], v['drill']) if R.get('native_vias') or v.get('copper_bars') or v.get('thermal_island') else (VD, VDR)
     vi = pcbnew.PCB_VIA(b); vi.SetPosition(V(v['x'], v['y'])); vi.SetWidth(MM(vd)); vi.SetDrill(MM(vdr)); vi.SetNet(net(v['net'])); b.Add(vi)
 polygon_zones = []
 NF = 0
@@ -90,7 +89,7 @@ for z in Z:
     if z.get("native_outlines") and z.get("zone_id"):
         if source_id in imported_zone_ids: continue
         imported_zone_ids.add(source_id)
-    if z.get('tropfen'):
+    if z.get('teardrop'):
         fo = pcbnew.PCB_SHAPE(b); fo.SetShape(pcbnew.SHAPE_T_POLY)
         ps = pcbnew.SHAPE_POLY_SET(); ps.NewOutline()
         for x, y in z['pts']: ps.Append(MM(x), MM(y))
@@ -109,7 +108,7 @@ for z in Z:
         for ring in contour.get('holes', []):
             hi = ol.NewHole(oi)
             for x, y in ring: ol.Append(MM(x), MM(y), oi, hi)
-    zo.SetMinThickness(MM(z.get('min_thickness',0.05 if z.get("strompfad") else 0.2)))
+    zo.SetMinThickness(MM(z.get('min_thickness',0.05 if z.get("current_path") else 0.2)))
     clr=z.get('local_clearance',ZCLR); zo.SetLocalClearance(None if clr is None else MM(clr))
     zo.SetIslandRemovalMode(z.get('island_removal',pcbnew.ISLAND_REMOVAL_MODE_ALWAYS))
     if 'fill_mode' in z: zo.SetFillMode(z['fill_mode'])
@@ -132,23 +131,23 @@ for z in Z:
     if 'hatch_orientation' in z: zo.SetHatchOrientation(pcbnew.EDA_ANGLE(z['hatch_orientation'],pcbnew.DEGREES_T))
     b.Add(zo)
     if z.get('polygon_dc'): polygon_zones.append(zo)
-for o in ALT: b.Remove(o)
-_fuellen = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('fuellen') != '0'
-if _fuellen: pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+for o in PREV: b.Remove(o)
+_fill = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x).get('fill') != '0'
+if _fill: pcbnew.ZONE_FILLER(b).Fill(b.Zones())
 
 
-if polygon_zones and _fuellen:
+if polygon_zones and _fill:
     b.BuildConnectivity()
     isolated = [z for z in polygon_zones
                 if all(q.m_Uuid == z.m_Uuid for q in b.GetConnectivity().GetConnectedItems(z))]
     for z in isolated:
-        print('Polygon ohne nativen Kontakt entfernt:', z.GetNetname(), z.GetPosition())
+        print('Polygon without native contact removed:', z.GetNetname(), z.GetPosition())
         b.Remove(z)
     if isolated:
         pcbnew.ZONE_FILLER(b).Fill(b.Zones())
-regeln_ziel_leeren(out)
-pcbnew.SaveBoard(out, b, True) if _projekt_pruefen else b.Save(out)
-if _projekt_pruefen and '.kicad_pro' not in _regeln:
+design_rules_goal_clear(out)
+pcbnew.SaveBoard(out, b, True) if _project_verify else b.Save(out)
+if _project_verify and '.kicad_pro' not in _design_rules:
     _manager.SaveProjectCopy(str(Path(out).with_suffix('.kicad_pro')), b.GetProject())
-regeln_kopieren(_regeln, out, erzeugtes_pro=True)
-print('Segmente', ns, 'echte Boegen', na, 'Vias', len(R['vias']), 'Zonen', len(Z) - NF, 'Fillet-Formen', NF, '->', out)
+design_rules_copy(_design_rules, out, generated_pro=True)
+print('Segments', ns, 'true arcs', na, 'Vias', len(R['vias']), 'Zones', len(Z) - NF, 'Fillet-Shapes', NF, '->', out)
