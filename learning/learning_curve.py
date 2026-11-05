@@ -27,23 +27,35 @@ def tasks(dataset='learning_curve'):
     return out
 
 
-def best_cfg(lines, nc, goal=None):
+def best_cfg(lines, nc, goal=None, minimum=30):
     from learning import selfplay as SS
     from learning import tasks as AU
     lines = [z for z in lines if str(z.get('version', '')).split('+')[0] == AU.VERSION]
     lines = [x for x in lines if x.get('cur_state') != 'code_changed' and not x.get('not_routed')]
+    lines = SS.epoch(lines)
     from analysis.standard import goal as default_target
     goal = default_target(explicit=goal, context='learning_curve')
     lines = [z for z in lines if SS.evaluation_target(z) == goal]
     if goal == 'minimax': lines = [z for z in lines if SS.reward(z) is not None]
     rew = [SS.reward(z) for z in lines] if goal == 'minimax' else SS.rewards(lines)
     cfg = {}
+    def layer_name(r):
+        m = sum(r) / len(r)
+        return m, (sum((q - m) ** 2 for q in r) / max(1, len(r) - 1) / len(r)) ** 0.5
     for k, value_list in sorted(SS.ARMS.items()):
-        best, bm = value_list[0], 9e9
-        for w in value_list:
-            r = [b for x, b in zip(lines, rew) if SS.arm(x, k) == w and x.get('net_class') == nc] or \
-                [b for x, b in zip(lines, rew) if SS.arm(x, k) == w]
-            if len(r) >= 3 and sum(r) / len(r) < bm: best, bm = w, sum(r) / len(r)
+        basis = REF.get(k, value_list[0])
+
+        own = [(SS.arm(x, k), b) for x, b in zip(lines, rew) if x.get('net_class') == nc]
+        all_items = [(SS.arm(x, k), b) for x, b in zip(lines, rew)]
+        pool = own if sum(1 for a, _ in own if a == basis) >= minimum else all_items
+        per = {w: [b for a, b in pool if a == w] for w in value_list}
+        best = basis
+        if len(per.get(basis, [])) >= minimum:
+            m0, s0 = layer_name(per[basis]); bm = m0
+            for w in value_list:
+                if w == basis or len(per[w]) < minimum: continue
+                m, s = layer_name(per[w])
+                if m < bm and m + 2 * (s * s + s0 * s0) ** 0.5 < m0: best, bm = w, m
         cfg[k] = best
     cfg['seed'] = 1
     return cfg
@@ -272,6 +284,7 @@ def main():
             if kw.get('daily_measurement','1') != '0' and acceptance_due() and not os.path.exists(stop): frozen(kw.get('parallel', '3'), dataset='acceptance')
             if int(kw.get('loops','0')) and cycles >= int(kw['loops']): return
 
+
             current = read_in()
             rest = max(60, (24 - old_h(current[-1])) * 3600) if current else 60
             t0 = time.time()
@@ -279,6 +292,7 @@ def main():
                 time.sleep(min(60,iv))
         return
     for z in read_in(): print(z['time_s'], z['code'], '%d/%d valid' % (z['is_valid'], z['tasks']), 'CPU/is_valid', z['cpu_per_valid'], z['valid_per_level'])
+
 
 def hourly_report(kw, stop):
     while not os.path.exists(stop):

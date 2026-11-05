@@ -190,17 +190,23 @@ def class_matching(x, nc):
     return new == nc
 
 
+def epoch(lines, minimum=300):
+    if not lines: return lines
+    new = [x for x in lines if x.get('version') == lines[-1].get('version')]
+    return new if len(new) >= minimum else lines
+
+
 def arm(x, k):
     v = (x.get('cfg') or {}).get(k)
     if k == 'bga' and v is None: return 'off'
     return 'prior' if k in ('placer', 'router') and v is None else v
-
-
 BGA_VARIANTS = {'off': [], 'fanout': ['bga_fanout=1'],
                  'plan': ['bga_fanout=1', 'bga_plan=1'],
                  'lanes': ['bga_fanout=1', 'bga_plan=1', 'bga_lanes=1'],
                  'own_via': ['bga_fanout=1', 'bga_plan=1', 'bga_own_via=1'],
                  'safe': ['bga_fanout=1', 'bga_plan=1', 'bga_own_via=1', 'bga_inner_width=1']}
+
+
 def shape_arms_read(amount):
     if amount is None: return None
     if amount == '0': return list(ARMS['shaping'])
@@ -217,7 +223,7 @@ def choice(lines, nc, rnd, goal='v3', bga_axis=False, style_per_net_kind=False, 
     if goal == 'minimax':
         profile_data = nc.split('|profile_data:')[-1]
         lines = [x for x in lines if (x.get('rule') or {}).get('minimax_profile') == profile_data and reward(x) is not None]
-    lines = [x for x in lines if str(x.get('version', '')).split('+')[0] == AU.VERSION]
+    lines = epoch([x for x in lines if str(x.get('version', '')).split('+')[0] == AU.VERSION])
     lines = lines[-3000:]
     rew = [reward(x) for x in lines] if goal == 'minimax' else rewards(lines)
     cfg = {}
@@ -449,6 +455,7 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
             logbook.update(loaded); z = logbook
         else: z = loaded
 
+
         from learning.learning_effect import cpu_s
         preparation = cpu_s(loaded)
         if preparation is None:
@@ -531,6 +538,7 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
         rcmd += ['attempts_cpu_emergency_stop=%d' % (emergency_stop + 60)]
     if (native_options.get('skew') == '1' or int(native_options.get('attempts', '0')) > 0) and not native_options.get('kicad_native_basis'):
 
+
         from learning.copper_kicad_native import rule_contract
         from kicad.python_call import python_command
         native = Path(c, 'native_basis'); native.mkdir(exist_ok=True)
@@ -573,6 +581,7 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
                  invalid_reason='Router without partial result'); return z
     if FR.active(cfg.get('early_abort')) and json.load(open(rj)).get('final') == 'early_abort':
 
+
         from postprocessing.short_circuit_protection import candidate_save
         reason = candidate_save(bj, rj)
         z.update(is_valid=None, cur_state='r44_unchecked' if reason else 'early_abort',
@@ -611,7 +620,6 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
         json.dump(RR, open(rj, 'w'))
     route_gnd_layers = A['gnd_layers']
     if 'current_first=1' in rcmd and os.path.exists(rj):
-
 
         route_gnd_layers = json.load(open(rj))['options']['gnd_layers'].split(',')
         z['gnd_layers'] = route_gnd_layers
@@ -781,7 +789,6 @@ def attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, total_c
     z.setdefault('s', 0.0)
     preparation_save()
     return z
-
 def dataset_capture(ad, A, z, k, only_place=False, cpu=None, candidates=3, candidates_auto=True):
     _tc_dense = time.thread_time()
     try:
