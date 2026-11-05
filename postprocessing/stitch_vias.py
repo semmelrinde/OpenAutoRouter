@@ -5,7 +5,7 @@ from shapely.strtree import STRtree
 
 B = json.load(open(sys.argv[1])); R = json.load(open(sys.argv[2])); Z = json.load(open(sys.argv[3])); OUT = sys.argv[4]
 a = dict(x.split('=', 1) for x in sys.argv[5:] if '=' in x)
-GRID = float(a.get('raster', '1.5')); EDGE = float(a.get('edge', '0.9')); DIST = float(a.get('dist', '0.2'))
+GRID = float(a.get('raster', '1.5')); EDGE = float(a.get('edge_clr', '0.9')); DIST = float(a.get('dist', '0.2'))
 VR = float(a.get('via', '0.45')) / 2; MINC = float(a.get('h2h', '0.2')) + float(a.get('drill', '0.2')) + 0.03
 
 board = unary_union([Polygon(o) for o in B['outline']])

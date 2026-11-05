@@ -52,7 +52,14 @@ for f in b.GetFootprints():
                     e = mm(p.GetSolderMaskExpansion(ml))
                     mask[L] = round(e, 4)
                 except Exception: pass
+
+        local = None
+        for source in (p, f):
+            try: v = source.GetLocalClearance()
+            except Exception: v = None
+            if v is not None and v > 0: local = mm(v); break
         pads.append(dict(ref=f.GetReference(), num=p.GetNumber(), net=p.GetNetname(), layers=lays, polys=polys, mask=mask,
+                         **({'clearance': round(local, 4)} if local else {}),
                          padstack_complete=True, hole_polys=poly_pts(hole), drill_size=drill_size,
                          dru_pad_type={pcbnew.PAD_ATTRIB_PTH:'Through-hole',pcbnew.PAD_ATTRIB_SMD:'SMD',pcbnew.PAD_ATTRIB_CONN:'Edge connector',pcbnew.PAD_ATTRIB_NPTH:'NPTH, mechanical'}[p.GetAttribute()],
                          pad_type='npth' if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH else 'pth' if p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH else 'smd',

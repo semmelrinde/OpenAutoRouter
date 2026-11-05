@@ -61,32 +61,32 @@ class Copper:
                 for s1, s2 in zip(ks[:-1], ks[1:]):
                     p1, p2 = part[s1], part[s2]; u, v = self.nodes(L, *p1), self.nodes(L, *p2)
                     if u == v: continue
-                    self.edge(u, v, math.dist(p1, p2), 0.0); self.seg.append((L, p1, p2, w, u, v))
+                    self.edge_clr(u, v, math.dist(p1, p2), 0.0); self.seg.append((L, p1, p2, w, u, v))
         vl = collections.defaultdict(set)
         for i, v in enumerate(vias):
-            for L in cu_layers: self.edge(('V', i, L), self.nodes(L, v['x'], v['y']), 0.0, 0); vl[i].add(L)
+            for L in cu_layers: self.edge_clr(('V', i, L), self.nodes(L, v['x'], v['y']), 0.0, 0); vl[i].add(L)
         for idx, p in pads:
             G = geo[idx]; pk = ('P', idx); self.adj[pk]
             bx0, by0, bx1, by1 = p['bbox']
-            for L, q, gap in connection[idx]: self.edge(pk, self.nodes(L, *q), gap, 0)
+            for L, q, gap in connection[idx]: self.edge_clr(pk, self.nodes(L, *q), gap, 0)
             for i, v in enumerate(vias):
                 if not (bx0 - via_r - TOL <= v['x'] <= bx1 + via_r + TOL and by0 - via_r - TOL <= v['y'] <= by1 + via_r + TOL): continue
                 for L in sorted(G):
                     d = G[L].distance(Point(v['x'], v['y']))
-                    if d <= via_r + TOL: self.edge(pk, ('V', i, L), d, 0); vl[i].add(L)
+                    if d <= via_r + TOL: self.edge_clr(pk, ('V', i, L), d, 0); vl[i].add(L)
         for a, (i, p) in enumerate(pads):
             for j, q in pads[a + 1:]:
                 if p['bbox'][0] > q['bbox'][2] or q['bbox'][0] > p['bbox'][2] or p['bbox'][1] > q['bbox'][3] or q['bbox'][1] > p['bbox'][3]: continue
-                if any(L in geo[j] and geo[i][L].distance(geo[j][L]) <= 1e-6 for L in geo[i]): self.edge(('P', i), ('P', j), 0.0, 0)
+                if any(L in geo[j] and geo[i][L].distance(geo[j][L]) <= 1e-6 for L in geo[i]): self.edge_clr(('P', i), ('P', j), 0.0, 0)
         if surface:
             for i in range(len(vias)): vl[i].add('#')
             kn = [(('V', i, '#'), (v['x'], v['y'])) for i, v in enumerate(vias)] + [(('P', i), (p['x'], p['y'])) for i, p in pads if p.get('drill')]
             for a, (ka, pa) in enumerate(kn):
-                for kb, pb in kn[a + 1:]: self.edge(ka, kb, math.dist(pa, pb), 0)
+                for kb, pb in kn[a + 1:]: self.edge_clr(ka, kb, math.dist(pa, pb), 0)
         for i, Ls in sorted(vl.items()):
             Ls = sorted(Ls)
             for a, La in enumerate(Ls):
-                for Lb in Ls[a + 1:]: self.edge(('V', i, La), ('V', i, Lb), 0.0, 1)
+                for Lb in Ls[a + 1:]: self.edge_clr(('V', i, La), ('V', i, Lb), 0.0, 1)
 
     def nodes(self, L, x, y):
         cx, cy = int(math.floor(x / TOL)), int(math.floor(y / TOL))
@@ -96,7 +96,7 @@ class Copper:
                     if math.hypot(px - x, py - y) <= TOL: return ('N', L, px, py)
         self._kan.setdefault((L, cx, cy), []).append((x, y)); return ('N', L, x, y)
 
-    def edge(self, a, b, total_length, change):
+    def edge_clr(self, a, b, total_length, change):
         self.adj[a].append((b, total_length, change)); self.adj[b].append((a, total_length, change))
 
     def paths(self, start):

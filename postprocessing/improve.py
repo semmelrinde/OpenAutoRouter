@@ -17,6 +17,7 @@ from postprocessing import attempt_log as VL
 VPY = os.path.join(R, '.venv', 'bin', 'python')
 D = os.path.abspath(sys.argv[1])
 args = dict(a.split('=', 1) for a in sys.argv[2:] if '=' in a)
+_SLOTS_BEFORE = os.environ.get('AUTOROUTER_SLOTS')
 os.environ['AUTOROUTER_SLOTS'] = '4'
 ROUNDS = int(args.get('rounds_n', '3')); PAR = min(4, max(1, int(args.get('parallel', '4')))); NET_COPPER = int(args.get('cand', '12'))
 ITER = args.get('iter', '15'); MAXS = float(args.get('max_step', '0.35')); MIND = float(args.get('minimum', '2.0'))
@@ -73,6 +74,11 @@ opt = dict(R0.get('options') or {})
 if 'opt' in args: opt.update(dict(x.split('=', 1) for x in args['opt'].split() if '=' in x))
 for k in ('start', 'new', 'new_nets', 'all_items', 'png', 'pre', 'iter', 'short', 'relayed', 'fix', 'only', 'netclasses', 'design_rules'): opt.pop(k, None)
 opt.update(design_rules=os.path.join(D, 'design_rules.json'), netclasses=os.path.join(D, 'netclasses.json'))
+if opt.get('budget') == 'work':
+
+
+    if _SLOTS_BEFORE is None: os.environ.pop('AUTOROUTER_SLOTS', None)
+    else: os.environ['AUTOROUTER_SLOTS'] = _SLOTS_BEFORE
 WORK = os.path.join(D, 'improve'); os.makedirs(WORK, exist_ok=True)
 LOG = open(os.path.join(D, 'improve.log'), 'a')
 def log(*a):
@@ -98,8 +104,14 @@ def route(board, start, out, new=None, iter_=ITER, net_list=None):
     from postprocessing.short_circuit_protection import protection_on, protection_option
     cmd += ['%s=%s' % kv for kv in opt.items()] + protection_option(protection_on(opt))
 
-    rr = PL.job(cmd, log=out + '.route.log', env=dict(os.environ, PYTHONHASHSEED='0', AUTOROUTER_SLOTS='4'))
+
+    limits = dict(cpu_s=float(opt['cpu_max']) + 60) if opt.get('budget') == 'work' and float(opt.get('cpu_max', 0)) > 0 else {}
+    route_env = dict(os.environ, PYTHONHASHSEED='0')
+    if opt.get('budget') != 'work': route_env['AUTOROUTER_SLOTS'] = '4'
+    rr = PL.job(cmd, log=out + '.route.log', env=route_env, **limits)
     json.dump(dict(rr, command=cmd), open(out + '.route.meta.json', 'w'))
+    if opt.get('budget') == 'work' and (rr['cur_state'] != 'ok' or rr['rc'] != 0 or not os.path.exists(out)):
+        raise SystemExit('budget=work: repair search failed; no reproducible result')
     return rr['rc'] == 0 and os.path.exists(out)
 
 

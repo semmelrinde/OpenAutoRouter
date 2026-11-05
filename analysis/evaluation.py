@@ -279,6 +279,11 @@ def rate(B, R, K, ir=False, zone_list=None, v3=False, minimax=None, length_gate=
     detours.sort(reverse=True)
     diagnose = 'conflicts' in R and 'failed' in R
     conf = len(R.get('conflicts') or {}); open_items = len(R.get('failed') or [])
+    end_gate = None
+    from analysis.end_gate import active as end_gate_active
+    if diagnose and conf == 0 and end_gate_active(R):
+        from analysis.end_gate import verify as end_gate_verify
+        end_gate = end_gate_verify(B, R, K); conf = end_gate['faults']
     unconn = not_connected(B, R, gnd_areas(R, GND, K) | native_areas(R, K), flow_cache=flow_cache, K=K)
     vias = len(R['vias'])
     tight = 0.0; tight_sites = []
@@ -315,6 +320,7 @@ def rate(B, R, K, ir=False, zone_list=None, v3=False, minimax=None, length_gate=
                 narrowing=round(tight, 2), narrowings=tight_sites[:10],
                 detour_total_sum=round(sum(u[0] for u in detours), 1), detours=detours[:15])
     if under: E['min_width_violations'] = under
+    if end_gate is not None: E['end_gate'] = end_gate
     dc = dc_values(E, B, R, K, flow_cache=flow_cache) if ir else None
     v2, v2d = score_v2(E, B, R, K, dc=dc) if ir else (None, None)
     E.update(score_v2=round(v2, 1) if v2 is not None else None, score_v2_raw=v2, score_v2_parts=v2d,

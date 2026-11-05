@@ -4,6 +4,8 @@ from shapely.geometry import Polygon, Point, LineString
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from shapely.prepared import prep
+import shapely
+from scipy.spatial import cKDTree
 
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KPY = '/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3'
@@ -78,26 +80,44 @@ for z in C['zones']:
         A = DIST_S if close else DIST
 
         bx = P.bounds
-        xs = np.arange(bx[0], bx[2], 0.2); ys = np.arange(bx[1], bx[3], 0.2)
-        probe = [(x, y) for x in xs for y in ys if Pp.contains(Point(x, y))] or [(P.representative_point().x, P.representative_point().y)]
-        Pin = prep(P.buffer(-VR))
-        cand = [(x, y) for x in np.arange(bx[0], bx[2], 0.1) for y in np.arange(bx[1], bx[3], 0.1) if Pin.contains(Point(x, y))]
-        def open_items(vs):
-            return [p for p in probe if not vs or min(math.hypot(p[0] - a, p[1] - b_) for a, b_ in vs) > A]
+
+
+        def raster(g, h):
+            GX, GY = np.meshgrid(np.arange(bx[0], bx[2], h), np.arange(bx[1], bx[3], h), indexing='ij')
+            m = shapely.contains_xy(g, GX.ravel(), GY.ravel())
+            return np.column_stack([GX.ravel()[m], GY.ravel()[m]])
+        probe = raster(P.buffer(0.01), 0.2)
+        if not len(probe): probe = np.array([[P.representative_point().x, P.representative_point().y]])
+        cand = raster(P.buffer(-VR), 0.1)
+        def nearest(pts, vs):
+            d = np.full(len(pts), np.inf)
+            for a, b_ in vs: d = np.minimum(d, np.hypot(pts[:, 0] - a, pts[:, 1] - b_))
+            return d
         vs = list(da); assigned = 0
-        while len(vs) < NMIN or open_items(vs):
-            op = open_items(vs)
+        pd, kd = nearest(probe, vs), nearest(cand, vs)
+        def open_items(vs): return probe[pd > A]
+        kt = cKDTree(cand) if len(cand) else None; cnt = None
+        while len(vs) < NMIN or (pd > A).any():
+            on = pd > A
+            ok = kd >= 0.6
+            if on.any():
+                if cnt is None:
+                    cnt = cKDTree(probe[on]).query_ball_point(cand, A, return_length=True).astype(float) if len(cand) else np.zeros(0)
+                gain = np.where(ok, cnt, 0.0)
+            else: gain = np.where(ok, kd if vs else 1.0, 0.0)
             best = None
-            for x, y in cand:
-                if any(math.hypot(x - a, y - b_) < 0.6 for a, b_ in vs): continue
-                if op: gain = sum(1 for p in op if math.hypot(p[0] - x, p[1] - y) <= A)
-                else: gain = min(math.hypot(x - a, y - b_) for a, b_ in vs) if vs else 1.0
-                if gain <= 0: continue
-                if best is not None and gain <= best[0]: continue
-                if not via_ok(x, y, [(a, b_) for a, b_, n_ in new]): continue
-                best = (gain, x, y)
+            for i in np.lexsort((np.arange(len(cand)), -gain)):
+                if gain[i] <= 0: break
+                x, y = cand[i, 0], cand[i, 1]
+                if via_ok(x, y, [(a, b_) for a, b_, n_ in new]): best = (gain[i], x, y); break
             if best is None: break
             vs.append((best[1], best[2])); new.append((round(best[1], 3), round(best[2], 3), z['net'])); assigned += 1
+            pd = np.minimum(pd, np.hypot(probe[:, 0] - best[1], probe[:, 1] - best[2]))
+            too = on & (pd <= A)
+            if cnt is not None and too.any() and kt is not None:
+                idx = [i for l in kt.query_ball_point(probe[too], A) for i in l]
+                if idx: cnt -= np.bincount(np.array(idx, dtype=np.int64), minlength=len(cand))
+            kd = np.minimum(kd, np.hypot(cand[:, 0] - best[1], cand[:, 1] - best[2]))
         way = len(vs) < NMIN and P.area < SPLIT
         if way:
             for _ in range(assigned): new.pop()
@@ -119,23 +139,38 @@ for z in C['zones']:
 ret = dict(vias=0, already=0, new=0, no_slot=0)
 if RET > 0 and NC:
     SCH = {n for n, k in NC['net_list'].items() if k['category'] == 'fast'}
+
+
     GNDZ = {}
     for z in C['zones']:
-        if z['net'] in GND: GNDZ.setdefault(z['layer'], []).extend(poly(q) for q in z['polys'])
-    GNDZ = {L: prep(unary_union(g).buffer(-VR)) for L, g in GNDZ.items() if g}
-    gnd_net = NC.get('gnd_main') or sorted(GND)[0]
+        if z['net'] in GND: GNDZ.setdefault(z['net'], []).extend(poly(q) for q in z['polys'])
+    GNDZ = {n: prep(unary_union(g).buffer(-VR)) for n, g in sorted(GNDZ.items()) if g}
+    gv_net = [(v['x'], v['y'], v['net']) for v in C['vias'] if v['net'] in GND] + [(p['x'], p['y'], p['net']) for p in C['pads'] if p['net'] in GND and p['drill'] > 0]
+    other = {}
+    if len(GNDZ) > 1:
+        for n in GNDZ:
+            g = [LineString(t['pts']).buffer(t['w'] / 2) if len(t['pts']) > 1 else Point(t['pts'][0]).buffer(t['w'] / 2) for t in C['tracks'] if t['net'] in GND and t['net'] != n]
+            g += [Point(w['x'], w['y']).buffer(w['d'] / 2) for w in C['vias'] if w['net'] in GND and w['net'] != n]
+            g += [poly(q) for p in C['pads'] if p['net'] in GND and p['net'] != n for ps in p['polys'].values() for q in ps]
+
+            other[n] = STRtree(g) if g else None
     for v in C['vias']:
         if v['net'] not in SCH: continue
         ret['vias'] += 1
-        all_items = gnd_vias + [(a, b_) for a, b_, n_ in new]
+        here = [n for n, Z in GNDZ.items() if Z.contains(Point(v['x'], v['y']))]
+        all_items = [(a, b_) for a, b_, n_ in gv_net + new if not here or n_ in here]
         if any(math.hypot(v['x'] - a, v['y'] - b_) <= RET for a, b_ in all_items): ret['already'] += 1; continue
         ok = False
         for r in (0.55, 0.7, 0.85, 1.0, 1.15, RET - 0.02):
             for k in range(24):
                 x = v['x'] + r * math.cos(2 * math.pi * k / 24); y = v['y'] + r * math.sin(2 * math.pi * k / 24)
-                if not any(Z.contains(Point(x, y)) for Z in GNDZ.values()): continue
+                nn = [n for n, Z in GNDZ.items() if Z.contains(Point(x, y)) and (not here or n in here)]
+                if not nn: continue
+                if len(nn) > 1:
+                    nn = [NC.get('gnd_main')] if NC.get('gnd_main') in nn else sorted(nn)[:1]
+                if other.get(nn[0]) is not None and len(other[nn[0]].query(Point(x, y).buffer(VR + DRC), predicate='intersects')): continue
                 if not via_ok(x, y, [(a, b_) for a, b_, n_ in new]): continue
-                new.append((round(x, 3), round(y, 3), gnd_net)); ok = True; break
+                new.append((round(x, 3), round(y, 3), nn[0])); ok = True; break
             if ok: break
         ret['new' if ok else 'no_slot'] += 1
     print('Return vias of fast nets: %d signal vias, %d already with GND via <= %.2f mm, %d new, %d without room' % (

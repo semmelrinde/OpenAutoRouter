@@ -1283,9 +1283,49 @@ def legalize(islands, state, layer_name, post_pins=True):
 
     allowed = {r: sum(g.difference(inner).area for g in T[r].geo(fps[r]['x'], fps[r]['y'], 0.0, fps[r]['side']).values()) for r in layer_name}
     keep_abs = {kr: kp_abs(kr, layer_name[kr], small=True) for kr in KPLK if kr in layer_name}
+
+
+
+
+
+
+
+
+
+    inherit = {}
+    orig = {r: T[r].geo(fps[r]['x'], fps[r]['y'], 0.0, fps[r]['side']) for r in layer_name} if args.get('inherit_overlap', '1') == '1' else {}
+    if orig:
+        import shapely as _shp
+        _st = {}
+        for r in sorted(T):
+            if r not in fps: continue
+            for s_, g in (orig.get(r) or T[r].geo(fps[r]['x'], fps[r]['y'], 0.0, fps[r]['side'])).items(): _st.setdefault(s_, []).append((r, g))
+        _over = set()
+        for s_, L_ in _st.items():
+            _tr = _shp.STRtree([g for _, g in L_])
+            for i, (r, g) in enumerate(L_):
+                for j in _tr.query(g):
+                    if int(j) != i and g.intersection(L_[int(j)][1]).area > 1e-4: _over.add(r)
+        _n = len({r for L_ in _st.values() for r, _ in L_})
+        if len(_over) > max(4, float(args.get('inherit_max', '0.6')) * _n):
+            print('Inherit off: %d of %d parts overlap in the original (no real layout)' % (len(_over), _n), flush=True)
+            orig = {}
+    INHERIT_ON[0] = bool(orig)
+    if orig:
+        pinned = [q for q in sorted(layer_name) if PARTS.get(q, {}).get('pinned')]
+        for r in sorted(layer_name):
+            if PARTS.get(r, {}).get('pinned'): continue
+            for q in pinned:
+                if any(s_ in orig[q] and g.distance(orig[q][s_]) < 0.005 for s_, g in orig[r].items()):
+                    inherit.setdefault(r, {})[q] = ({s_: g.intersection(orig[q][s_]).buffer(0.01) for s_, g in orig[r].items() if s_ in orig[q]},
+                                                 T[q].geo(*layer_name[q]))
     def problem(r, s, bel, ign=None):
         geo = T[r].geo(*s)
-        if bel.collision(geo, ignore=ign or {r}): return True
+        e = inherit.get(r)
+        if bel.collision(geo, ignore=(set(ign or {r}) | set(e)) if e else (ign or {r})): return True
+        if e and any(g.buffer(0.005).intersection(gq[s_]).difference(permitted[s_]).area > 1e-4
+                     for permitted, gq in e.values() for s_, g in geo.items() if s_ in gq and s_ in permitted):
+            return True
         if not PARTS.get(r, {}).get('pinned') and any(not inner_p.contains(Point(x, y)) for nr, net, x, y, ps in T[r].pads_abs(*s)):
             return True
         if PAD_EDGE is not None and not PARTS.get(r,{}).get('pinned') and not PAD_EDGE.vacant(r,s):return True
@@ -1320,8 +1360,6 @@ def legalize(islands, state, layer_name, post_pins=True):
             return {side:unary_union(v) for side,v in gs.items()}
         return clearance(r,st,bel,prob,geometry=geometry if r in POWER else None,**kw)
     def compact_refit(refs, pair=False, cross_hard=False):
-
-
 
         order=sorted(refs,key=lambda r:(type_(r,'') != 'L',type_(r,'') != 'D',r))
         pf=Pairs(layer_name) if pair else None
@@ -1385,25 +1423,54 @@ def legalize(islands, state, layer_name, post_pins=True):
 
 
         large = [r for r in layer_name if PARTS[r]['pinned'] or PARTS[r]['role'] != 'small']
-        for r in sorted([r for r in large if not PARTS[r]['pinned'] and r not in SEQUENCE and r not in FIXED_EXTRA], key=lambda r: -T[r].surface):
+        _chips = sorted([r for r in large if not PARTS[r]['pinned'] and r not in SEQUENCE and r not in FIXED_EXTRA], key=lambda r: -T[r].surface)
+        for _i, r in enumerate(_chips):
             bel_g = Occupancy()
+
+            _later = {q for c in _chips[_i + 1:] for q in movement_refs(c)} if IN_ADVANCE_LARGE else set()
             for q in large:
-                if q not in movement_refs(r): bel_g.add(q, T[q].geo(*layer_name[q]))
+                if q not in movement_refs(r) and q not in _later: bel_g.add(q, T[q].geo(*layer_name[q]))
             if not problem_g(r, layer_name[r], bel_g): continue
             hard = search_free(r, layer_name[r], bel_g, problem_hard, rotate=True) if WW_ON else None
-            best = hard or search_free(r, layer_name[r], bel_g, problem_g, rotate=True)
+            best = hard or search_free(r, layer_name[r], bel_g, problem_g, rotate=True); _single = False
+            if best is None and IN_ADVANCE_LARGE and (allowed[r] > 1e-3 or inherit.get(r)):
+
+
+                _o = (fps[r]['x'], fps[r]['y'], 0.0, fps[r]['side'])
+
+
+                _single = _o[2] != layer_name[r][2] and not groups_rotatable(r, chip=True) and movement_refs(r) == {r} and r not in POWER
+                if (_o[2] == layer_name[r][2] or groups_rotatable(r, chip=True) or _single) and not (
+                        problem(r, _o, bel_g, movement_refs(r)) if _single else problem_g(r, _o, bel_g)):
+                    best = (math.hypot(_o[0] - layer_name[r][0], _o[1] - layer_name[r][1]), _o)
+                    print('  Chip %s at its original location (overhang/overlap as in the original)' % r, flush=True)
+                else: _single = False
             best = legal_roam_choice(r, best, hard, layer_name, cause(r, layer_name[r], bel_g))
             if best:
                 print('  Chip %s moved to free room before legalizing (%.1f mm)' % (r, best[0]), flush=True)
-                for q, sq in with_group(r, best[1], layer_name).items():
+                prev_r = layer_name[r]
+                for q, sq in ({r: best[1]} if _single else with_group(r, best[1], layer_name)).items():
                     layer_name[q] = sq
                     if KEEPOUT_ON and q in keep_abs: keep_abs[q] = kp_abs(q, sq, small=True)
+                if IN_ADVANCE_LARGE and prev_r[3] == best[1][3] and (math.hypot(best[1][0] - prev_r[0], best[1][1] - prev_r[1]) >= 1.0
+                                                              or (best[1][2] - prev_r[2]) % 360):
+                    dth = (best[1][2] - prev_r[2]) % 360
+                    with_ = sorted(q for q in owner[r].refs if q in layer_name and q not in movement_refs(r) and PARTS[q]['role'] == 'small'
+                                 and not PARTS[q]['pinned'] and q not in FIXED_EXTRA and q not in SEQUENCE and layer_name[q][3] == prev_r[3])
+                    for q in with_:
+                        for q2 in movement_refs(q):
+                            if q2 not in layer_name: continue
+                            x, y, th, sd = layer_name[q2]
+                            dx, dy = rot_pt(x - prev_r[0], y - prev_r[1], dth)
+                            layer_name[q2] = (best[1][0] + dx, best[1][1] + dy, (th + dth) % 360, sd)
+                            if KEEPOUT_ON and q2 in keep_abs: keep_abs[q2] = kp_abs(q2, layer_name[q2], small=True)
+                    if with_: print('    with %s: %s' % (r, ' '.join(with_)), flush=True)
     def important(r): return WT.get(r, {}).get('importance', 0.0) if PIN_LEGAL else 0.0
     before = None
     for rnd in range(8):
         bel, pad_idx = new_index()
         bad = [r for r in layer_name if problem(r, layer_name[r], bel, mates(r))]
-        print('  Legalize round %d: %d parts with collision/edge' % (rnd + 1, len(bad)), flush=True)
+        print('  Legalize round %d: %d parts with collision/edge%s' % (rnd + 1, len(bad), ' (%s)' % ' '.join(sorted(bad)) if 0 < len(bad) <= 12 else ''), flush=True)
         if not bad: break
         wide = before is not None and len(bad) >= before
         if wide and rnd >= 3: break
@@ -1453,7 +1520,9 @@ def legalize(islands, state, layer_name, post_pins=True):
                     if KEEPOUT_ON and q in keep_abs: keep_abs[q] = kp_abs(q, sq, small=True)
             for q in movement_refs(r):
                 if q in layer_name: bel.add(q, T[q].geo(*layer_name[q]))
-    if PHYSICS and args.get('legal_pack', '1') == '1' and MODE == 'new':
+
+
+    if (PHYSICS or args.get('legal_pack_all', '1') == '1') and args.get('legal_pack', '1') == '1' and MODE == 'new':
 
 
         bel, _ = new_index()
@@ -1534,8 +1603,14 @@ def legalize(islands, state, layer_name, post_pins=True):
         print('  Single C reoptimized to current pins after legalization: %s (legal, crossings not increased)' % ','.join(sorted(PIN_POST_LEGALIZE)),flush=True)
     return layer_name
 
-
 CLEARANCE = args.get('clearance', '1') == '1'
+INHERIT_ON = [True]
+IN_ADVANCE_LARGE = args.get('in_advance_large', '1') == '1'
+
+
+FREE_COARSE = float(args.get('free_coarse', '0.5'))
+FREE_COARSE_N = int(args.get('free_coarse_n', '8000'))
+
 
 def clearance(r, st0, bel, problem, raster=0.1, n_max=400, rotate=False, geometry=None):
     from PIL import Image, ImageDraw
@@ -1563,6 +1638,8 @@ def clearance(r, st0, bel, problem, raster=0.1, n_max=400, rotate=False, geometr
     vacant = np.array(img0, dtype=bool)
     if PHYSICS:
 
+
+
         edt = ndimage.distance_transform_edt(np.pad(vacant, 1, constant_values=False))[1:-1, 1:-1] * raster
     else:
         edt = ndimage.distance_transform_edt(vacant) * raster
@@ -1586,6 +1663,25 @@ def clearance(r, st0, bel, problem, raster=0.1, n_max=400, rotate=False, geometr
         from placement.clearance_groups import search
         best = search(r,st0,bel,inner,geo,problem,ths,raster,n_max,keepout_from(r))
         if best: print('  Non-rectangular group %s in configuration space moved to free room (%.1f mm)' % (r,best[0]),flush=True)
+    if best is None and FREE_COARSE > 0:
+
+
+
+        for th in ths:
+            g0 = geo(0.0, 0.0, th, s0)
+            b = [min(g.bounds[0] for g in g0.values()), min(g.bounds[1] for g in g0.values()),
+                 max(g.bounds[2] for g in g0.values()), max(g.bounds[3] for g in g0.values())]
+            hw, hh = (b[2] - b[0]) / 2, (b[3] - b[1]) / 2
+            gx, gy = np.meshgrid(np.arange(bx[0] - hw, bx[2] + hw + FREE_COARSE, FREE_COARSE) - (b[0] + b[2]) / 2,
+                                 np.arange(bx[1] - hh, bx[3] + hh + FREE_COARSE, FREE_COARSE) - (b[1] + b[3]) / 2)
+            gx, gy = gx.ravel(), gy.ravel(); d = np.hypot(gx - x0, gy - y0)
+            for i in np.argsort(d, kind='stable')[:FREE_COARSE_N]:
+                st = (float(gx[i]), float(gy[i]), th, s0)
+                if not problem(r, st, bel):
+                    c = float(d[i]) + 0.2 * (th != th0)
+                    if best is None or c < best[0]: best = (c, st)
+                    break
+        if best: print('  %s on the coarse grid at a free slot (%.1f mm)' % (r, best[0]), flush=True)
     return best
 
 
@@ -1659,6 +1755,57 @@ def metrics(layer_name):
     return dict(air_line=round(tot, 1), weighted=round(wt, 1), fast=round(fast, 1), crossings=cross,
                 decoupling_medium=round(sum(dec) / len(dec), 2) if dec else None, decoupling_max=round(max(dec), 2) if dec else None,
                 collisions=kol)
+
+
+def unsolvable(layer_name, raster=0.1):
+    import shapely
+    from scipy.signal import fftconvolve
+    pinned = sorted(q for q in T if PARTS.get(q, {}).get('pinned'))
+    if not pinned: return []
+    st = lambda q: layer_name.get(q) or (fps[q]['x'], fps[q]['y'], 0.0, fps[q]['side'])
+    obst = {}
+    for q in pinned:
+        for s_, g in T[q].geo(*st(q)).items(): obst.setdefault(s_, []).append(g)
+    orig_fixed = {q: T[q].geo(fps[q]['x'], fps[q]['y'], 0.0, fps[q]['side']) for q in pinned}
+    obst_u = {s_: unary_union(L) for s_, L in obst.items()}
+    bx = inner.bounds; raster = max(raster, max(bx[2] - bx[0], bx[3] - bx[1]) / 2000)
+    nx = int((bx[2] - bx[0]) / raster) + 3; ny = int((bx[3] - bx[1]) / raster) + 3
+    gx, gy = np.meshgrid(bx[0] + (np.arange(nx) - 0.5) * raster, bx[1] + (np.arange(ny) - 0.5) * raster)
+    outer = ~shapely.contains_xy(inner.buffer(0.01), gx, gy)
+    blocked = {}
+    def keepout(s_):
+        if s_ not in blocked:
+            g = obst_u[s_].buffer(-0.01) if s_ in obst_u else None
+            blocked[s_] = (outer | shapely.contains_xy(g, gx, gy) if g is not None and not g.is_empty else outer).astype(float)
+        return blocked[s_]
+    off = []
+    for r in sorted(layer_name):
+        if PARTS.get(r, {}).get('pinned') or r not in fps: continue
+        now = T[r].geo(*layer_name[r])
+        if all(g.difference(inner).area <= 1e-3 and (s_ not in obst_u or g.intersection(obst_u[s_]).area <= 1e-4) for s_, g in now.items()): continue
+        o = T[r].geo(fps[r]['x'], fps[r]['y'], 0.0, fps[r]['side'])
+        if sum(g.difference(inner).area for g in o.values()) > 1e-3: continue
+        if INHERIT_ON[0] and any(s_ in orig_fixed[q] and g.intersects(orig_fixed[q][s_]) for q in pinned for s_, g in o.items()): continue
+        fits = False
+        for board_side in SIDES:
+            for th in (0.0, 90.0, 180.0, 270.0):
+                geo = T[r].geo(0.0, 0.0, th, board_side)
+                b = (min(g.bounds[0] for g in geo.values()), min(g.bounds[1] for g in geo.values()),
+                     max(g.bounds[2] for g in geo.values()), max(g.bounds[3] for g in geo.values()))
+                mx = int((b[2] - b[0]) / raster) + 1; my = int((b[3] - b[1]) / raster) + 1
+                if mx >= nx or my >= ny: continue
+                px_, py_ = np.meshgrid(b[0] + (np.arange(mx) + 0.5) * raster, b[1] + (np.arange(my) + 0.5) * raster)
+                ok = None
+                for s_, g in geo.items():
+                    k = g.buffer(-0.75 * raster)
+                    m = shapely.contains_xy(k, px_, py_).astype(float) if not k.is_empty else np.zeros((my, mx))
+                    if not m.any(): continue
+                    c = fftconvolve(keepout(s_), m[::-1, ::-1], mode='valid') < 0.5
+                    ok = c if ok is None else ok & c
+                if ok is None or ok.any(): fits = True; break
+            if fits: break
+        if not fits: off.append(r)
+    return off
 
 
 def rule_metrics(layer_name):
@@ -1752,6 +1899,9 @@ def outputs(islands, state, layer_name):
             density_export['p26_islands'] = dict(before=DM.island_measure(B, K, RG, part_list=T, pinned=pinned),
                                               after=DM.island_measure(B, K, RG, layer_name, T, pinned=pinned), weight=DENSE_ISLANDS)
     before = metrics({}); after = metrics(layer_name)
+    if after['collisions'] and args.get('unsolvable_chk', '1') == '1':
+        after['unsolvable'] = unsolvable(layer_name)
+        if after['unsolvable']: print('Unsolvable (E156): %s does not fit alone beside the fixed parts' % ', '.join(after['unsolvable']), flush=True)
     print('Metrics before ', before)
     print('Metrics after', after)
     rv = rule_metrics({}); rn = rule_metrics(layer_name)

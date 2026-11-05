@@ -144,7 +144,11 @@ def measure(B, R, K, gnd_layers, design_rules=None, pair_model=None, *, current_
     result = dict(geometry=geometry, hard_checking=hard_details, checker_cpu_s=checker_cpu,
                 side_strips=geometry['counter'].get('side_strips'),
                 own_net_slots=geometry['counter'].get('own_net_slot'),
-                via_bites=geometry['counter'].get('via_biss'), pieces=len(pieces), z2_outer_pct=round(100 * outer_area / max(1e-6, 2 * contour.area), 2),
+                via_bites=geometry['counter'].get('via_biss'),
+
+                via_bites_signal=sum(1 for mk in geometry.get('markers') or [] if mk.get('category') == 'via_biss'
+                                     and mk.get('via_net') not in set(K.get('gnd') or ['GND'])) if 'markers' in geometry else None,
+                pieces=len(pieces), z2_outer_pct=round(100 * outer_area / max(1e-6, 2 * contour.area), 2),
                 z2_median_mm2=round(q(fl, 0.5), 2) if fl else None, z2_p90_mm2=round(q(fl, 0.9), 2) if fl else None,
                 z2_pads_median=statistics.median([s['pads'] for s in pieces]) if pieces else None,
                 z2_without_pad_pct=round(100 * sum(1 for s in pieces if s['pads'] == 0) / max(1, len(pieces)), 1),
@@ -260,7 +264,7 @@ def compute(variant, par=3, gnd=False, **params):
 
 
 KEY = ('chain_eta', 'chain_eta_median', 'chain_element_max', 'copper_current_mm2', 'pieces', 'z2_outer_pct', 'z2_median_mm2', 'z2_p90_mm2', 'z2_without_pad_pct', 'z3_edges45_pct', 'z4_per_net_layer',
-              'z4_one_piece_pct', 'z4_splitter', 'sharp_corners', 'notches', 'wedges_45', 'wedges_80', 'r39_unnecessary_n', 'hard_violations', 'side_strips', 'own_net_slots', 'via_bites', 'checker_cpu_s', 'cpu_s', 'zones_judge_score')
+              'z4_one_piece_pct', 'z4_splitter', 'sharp_corners', 'notches', 'wedges_45', 'wedges_80', 'r39_unnecessary_n', 'hard_violations', 'side_strips', 'own_net_slots', 'via_bites', 'via_bites_signal', 'checker_cpu_s', 'cpu_s', 'zones_judge_score')
 
 
 def merge(variant, erg):

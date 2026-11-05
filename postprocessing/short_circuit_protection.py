@@ -45,13 +45,13 @@ def _null(a, b):
     return abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
 
 
-def export_contacts(board, data):
+def export_contacts(board, data, details=False):
     from shapely.geometry import Polygon, LineString, Point
     from shapely.strtree import STRtree
     stack = ['F'] + ['In%d' % i for i in range(1, int(board.get('cu_layers') or 2) - 1)] + ['B']
     geoms = {L: [] for L in stack}
-    def add(L, net, g, category, location, unit=None):
-        if not g.is_empty: geoms.setdefault(L, []).append((net, g, category, location, unit or net))
+    def add(L, net, g, category, location, unit=None, obj=None):
+        if not g.is_empty: geoms.setdefault(L, []).append((net, g, category, location, unit or net, obj))
     def rounded(g, r): return g.buffer(r / math.cos(math.pi / 64) + 1e-9, quad_segs=16)
     tie_groups = {f['ref']: [set(g) for g in f.get('net_tie_pad_groups', [])]
                   for f in board.get('fps', []) if f.get('net_tie')}
@@ -75,17 +75,17 @@ def export_contacts(board, data):
                 if key in seen: continue
                 seen.add(key); pad_refs[id(g)] = (p.get('ref'), p.get('num'))
                 add(L, net, g, 'pad', [p['x'], p['y']])
-    for t in data['tracks']:
+    for ti, t in enumerate(data['tracks']):
         t, error = track_preview(t)
-        for a, b, w in zip(t['pts'][:-1], t['pts'][1:], t['w']):
+        for si, (a, b, w) in enumerate(zip(t['pts'][:-1], t['pts'][1:], t['w'])):
             if _null(a, b): continue
-            add(t['layer'], t['net'], rounded(LineString([a, b]), w / 2 + error + (2e-6 if error else 0)), 'track', a, t.get('unit'))
+            add(t['layer'], t['net'], rounded(LineString([a, b]), w / 2 + error + (2e-6 if error else 0)), 'track', a, t.get('unit'), ('tracks', ti, si))
     d = float(str(data.get('options', {}).get('via', '0.45/0.20')).split('/')[0])
-    for v in data['vias']:
+    for vi, v in enumerate(data['vias']):
         g = rounded(Point(v['x'], v['y']), float(v.get('d', v.get('diameter', d))) / 2)
 
 
-        for L in v.get('layers') or stack: add(L, v['net'], g, 'via', [v['x'], v['y']], v.get('unit'))
+        for L in v.get('layers') or stack: add(L, v['net'], g, 'via', [v['x'], v['y']], v.get('unit'), ('vias', vi))
     for z in data.get('zone_list', []) + data.get('zones', []):
         if z.get('filled') is True:
 
@@ -116,6 +116,9 @@ def export_contacts(board, data):
                 if ref == other_ref and any({num, other_num} <= group for group in tie_groups.get(ref, [])): continue
             c = a[1].intersection(b[1]).representative_point()
             e = dict(layer_name=L, net_list=[a[0], b[0]], kinds=[a[2], b[2]], unit_list=[a[4], b[4]], location=[round(c.x, 6), round(c.y, 6)])
+            if details:
+                e['objects'] = [a[5], b[5]]
+                e['contact_wkb'] = a[1].intersection(b[1]).wkb_hex
             (inherited if a[2] == b[2] == 'pad' else out).append(e)
     return out, inherited
 
@@ -172,7 +175,7 @@ def export_ratsnest(board, net_list):
     return out
 
 
-def _export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoint=False):
+def _export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoint=False, rule_check=None):
     import hashlib
     unit_list = unit_list or {}; important = important or {}
     owners = {q.get('unit') for k in ('tracks', 'vias') for q in data.get(k, []) if q.get('unit')}
@@ -207,8 +210,13 @@ def _export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoi
             return result
         return data
     result = dict(data)
+    part_info = None
+    whole_way = way
+    if data.get('options', {}).get('r44_part') in ('1', 1):
+        from postprocessing.r44_part import partial_teardown
+        result, whole_way, part_info = partial_teardown(board, data, way, unit_list, pairs, rule_check)
     for k in ('tracks','vias','zone_list','zones'):
-        if k in data: result[k] = [q for q in data[k] if q.get('unit', q['net']) not in way]
+        if k in result: result[k] = [q for q in result[k] if q.get('unit', q['net']) not in whole_way]
     failed = set(data.get('failed', [])) | way
     result['failed'] = sorted(failed)
     if not checkpoint: result['ratsnest'] = export_ratsnest(board, {unit_list.get(n,n) for n in failed})
@@ -218,10 +226,17 @@ def _export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoi
         input_pad_contacts=inherited, remaining_contacts=0, minimal_proven=optimal,
         before_cleanup=dict(sha=raw_sha, track_list=len(data['tracks']), vias=len(data['vias'])),
         pairs_before_cleanup=list(pairs))
+    if part_info is not None:
+        result['short_circuit_protection']['partial_teardown'] = part_info
+        result['short_circuit_protection']['units_whole_removed'] = sorted(whole_way)
+        result['short_circuit_protection']['units_affected'] = sorted(way)
+        result['short_circuit_protection']['units_removed'] = sorted(whole_way)
+
+        result['short_circuit_protection']['minimal_proven'] = False
     return result
 
 
-def export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoint=False):
+def export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoint=False, rule_check=None):
     units = dict(unit_list or {})
     bad, errors = set(), []
     work = dict(data)
@@ -257,7 +272,7 @@ def export_safe(board, data, unit_list=None, important=None, pairs=(), checkpoin
         if key in work: work[key] = [q for q in work[key] if (q.get('unit') or q.get('net')) not in bad]
     work['failed'] = sorted(set(data.get('failed', [])) | bad)
     try:
-        result = _export_safe(board, work, units, important, pairs, checkpoint)
+        result = _export_safe(board, work, units, important, pairs, checkpoint, rule_check)
     except Exception as exc:
         errors.append(dict(reason='Overall check: '+str(exc)[:180]))
         result = dict(work)

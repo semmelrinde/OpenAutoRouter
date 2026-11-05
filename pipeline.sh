@@ -88,7 +88,7 @@ if [ "${PORTFOLIO:-0}" = "1" ]; then
   silk .
   ROUTED=1
 elif [ "$MODE" != "none" ]; then
-  echo "== A3-A5 Placer ($MODE)"
+  echo "== A3-A5 placer ($MODE)"
   if [ "$MODE" = "new" ] && [ "${CANDIDATES:-1}" -gt 1 ]; then
     NC=()
     for k in $(seq 1 $CANDIDATES); do

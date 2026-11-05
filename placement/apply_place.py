@@ -144,5 +144,13 @@ if PLACEMENT.get('outline'):
             raise ValueError('P26: unexpected shape in the rectangular outline')
 design_rules_goal_clear(out)
 b.Save(out)
+
+
+for _ in range(2):
+    if '.kicad_pro' in _design_rules or os.path.exists(os.path.splitext(out)[0] + '.kicad_pro'): break
+    b.Save(out)
+else:
+    if not os.path.exists(os.path.splitext(out)[0] + '.kicad_pro'):
+        print('WARNING E158: no .kicad_pro beside %s, net classes missing in export' % out, file=sys.stderr)
 design_rules_copy(_design_rules, out, generated_pro=True)
 print('accepted', len(P), 'parts, largest pad deviation %.4f mm ->' % worst, out)

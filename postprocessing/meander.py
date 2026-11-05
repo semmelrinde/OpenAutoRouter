@@ -144,7 +144,7 @@ def main():
     H = json.load(open(a[0]))
     from common.copper_net import Obstacles
     fwd = Obstacles(H, drc=float(o.get('drc', 0.09)), drcpad=float(o.get('drcpad', 0.10)), drcvia=float(o.get('drcvia', o.get('drc', 0.09))),
-                      hole_size=float(o.get('hole_size', 0.25)), edge=float(o.get('edge', 0.2)))
+                      hole_size=float(o.get('hole_size', 0.25)), edge_clr=float(o.get('edge_clr', 0.2)))
     design_rules = skew_design_rules(open(o['dru']).read()) if o.get('dru') else {}
     if o.get('pairs'):
         pl = [tuple(x.split(',')) for x in o['pairs'].split(';') if x]

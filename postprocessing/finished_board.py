@@ -135,7 +135,7 @@ def step_shorten(H, S, fwd, o, cur, tmp):
     hl = os.path.join(tmp, 'shortcut_hmax_layers.json'); json.dump(o.get('_hmax_layers') or {}, open(hl, 'w'))
     bj = os.path.join(tmp, 'shortcut_budget.json'); json.dump(lengths_budget(o.get('_L0'), H, o.get('_gate_nets')), open(bj, 'w'))
     opt = ['drc=' + o.get('drc', '0.09'), 'drcpad=' + o.get('drcpad', '0.10'), 'drcvia=' + o.get('drcvia', o.get('drc', '0.09')),
-           'border=' + o.get('edge', '0.2'), 'hole_size=' + o.get('hole_size', '0.25'), 'hmax=' + o.get('hmax', '0'), 'dead=1', 'without_dead=' + zj,
+           'border=' + o.get('edge_clr', '0.2'), 'hole_size=' + o.get('hole_size', '0.25'), 'hmax=' + o.get('hmax', '0'), 'dead=1', 'without_dead=' + zj,
            'hmax_layers=' + hl, 'hmax_plane=' + o.get('hmax_plane', '0.3'), 'budget=' + bj,
            'pcb=' + cur, 'fix=' + fj] + (['netclasses=' + o['netclasses']] if o.get('netclasses') else []) + (['keepout_list=' + o['keepout_list']] if o.get('keepout_list') else [])
     r = subprocess.run([VPY, os.path.join(A, 'postprocessing', 'shorten.py'), hj] + [str(x) for x in box] + [';'.join(net_list), oj] + opt,
@@ -157,7 +157,7 @@ def step_smooth(H, S, fwd, o, cur, tmp):
     from shapely.geometry import LineString, Point, Polygon
     from postprocessing.smooth45 import smooth
     clr = max(float(o.get('drc', 0.09)), float(o.get('drcpad', 0.10)), float(o.get('drcvia', o.get('drc', 0.09))))
-    hole_size, edge = float(o.get('hole_size', 0.25)), float(o.get('edge', 0.2))
+    hole_size, edge_clr = float(o.get('hole_size', 0.25)), float(o.get('edge_clr', 0.2))
     rings = sorted((Polygon(e).buffer(0) for e in H['edges'] if len(e) > 2), key=lambda g: -g.area)
     outer = rings[0]; slots = [g for g in rings[1:] if outer.contains(g.representative_point())]
     pads = collections.defaultdict(lambda: dict(polys=collections.defaultdict(list)))
@@ -169,7 +169,7 @@ def step_smooth(H, S, fwd, o, cur, tmp):
     for h in H.get('holes', []):
         c = list(Point(h['x'], h['y']).buffer(h['d'] / 2 + max(0.0, hole_size - clr), 16).exterior.coords)
         Bp.append(dict(net=h.get('net') or '#HOLE', polys={L: [c] for L in cu_layers}, x=h['x'], y=h['y']))
-    blocked = [dict(prohibitions=dict(track_list=True), polys=[list(g.buffer(edge, 8).exterior.coords)]) for g in slots]
+    blocked = [dict(prohibitions=dict(track_list=True), polys=[list(g.buffer(edge_clr, 8).exterior.coords)]) for g in slots]
     blocked += [dict(prohibitions=dict(track_list=True), polys=[k['poly']]) for k in H.get('keepouts', []) if k.get('tracks')]
     B = dict(pads=Bp, outline=[list(outer.exterior.coords)], keepouts=blocked,
              areas=[(n, L, g.buffer(max(0.0, c - clr), 8)) for n, L, g, c in o.get('_areas', ())])
@@ -182,7 +182,7 @@ def step_smooth(H, S, fwd, o, cur, tmp):
                               or t.get('uuid') in o.get('_fix', ()) else {})))
     dmax = max([v['d'] for v in H['vias']] + [0.45])
     R = dict(tracks=tracks, vias=[dict(net=v['net'], x=v['x'], y=v['y'], d=v['d']) for v in H['vias']],
-             options=dict(via='%g/0.2' % dmax, clr=clr, edge=edge))
+             options=dict(via='%g/0.2' % dmax, clr=clr, edge=edge_clr))
 
     arc = {(t['net'], t['layer']) for t in H['tracks'] if t.get('arc')}
     for t in R['tracks']:
@@ -196,7 +196,7 @@ def step_smooth(H, S, fwd, o, cur, tmp):
         before[(t['net'], t['layer'])].add(tuple(sorted([rd(t['pts'][0]), rd(t['pts'][-1])])))
     he = float(o.get('hmax_plane', 0.3))
     hm = {(n, L): he for n, Ls in (o.get('_hmax_layers') or {}).items() for L in Ls} if he > 0 else {}
-    info = smooth(B, R, clr=clr, border=edge, keepout_list=set(S), anchor=anchor, prev_obstacle=True, hmax=hm, corners_protection=True)
+    info = smooth(B, R, clr=clr, border=edge_clr, keepout_list=set(S), anchor=anchor, prev_obstacle=True, hmax=hm, corners_protection=True)
     after = collections.defaultdict(list)
     for t in R['tracks']: after[(t['net'], t['layer'])].append(t)
     D = dict(remove=[], add=[], stat=info)
@@ -557,7 +557,7 @@ def teardrop_new(src, dst, pro, dru, o, tmp):
     clr = max([f.get('clr') or 0.0 for f in zf(open(src, encoding='utf-8').read())] + [0.0]) or 0.2
     vacant = o.get('teardrop_free') or '%g' % round(max(float(o.get('drc', 0.09)), float(o.get('drcpad', 0.10))) + 0.012, 3)
     clearance = o.get('teardrop_clearance') or '%g' % round(clr + 0.005, 3)
-    border, hole_size = o.get('edge', '0.2'), o.get('hole_size', '0.25'); nc = ['netclasses=' + o['netclasses']] if o.get('netclasses') else []
+    border, hole_size = o.get('edge_clr', '0.2'), o.get('hole_size', '0.25'); nc = ['netclasses=' + o['netclasses']] if o.get('netclasses') else []
     topt = ['r=' + o.get('teardrop_r', '0.4'), 'vacant=' + clearance, 'free_hard=' + clearance, 'border=' + border, 'hole_size=' + hole_size] + nc
     def job(cmd, name):
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -745,7 +745,7 @@ def main():
             o['_areas'] = [(f['net'], f['layer'], f['poly'], f['clr']) for f in fill if f['net'] in S]
             o['_fill'] = fill
             fwd = Obstacles(H, drc=float(o.get('drc', 0.09)), drcpad=float(o.get('drcpad', 0.10)), drcbga=float(o.get('drcbga', 0.09)),
-                              drcvia=float(o.get('drcvia', o.get('drc', 0.09))), hole_size=float(o.get('hole_size', 0.25)), edge=float(o.get('edge', 0.2)),
+                              drcvia=float(o.get('drcvia', o.get('drc', 0.09))), hole_size=float(o.get('hole_size', 0.25)), edge_clr=float(o.get('edge_clr', 0.2)),
                               net_spacing=net_spacings(dru, {t['net'] for t in H['tracks']}), areas=o['_areas'])
             step_nr += 1; sname = '%02d %s R%d' % (step_nr, name, rnd + 1)
             log('Step %s%s' % (name, ' round %d' % (rnd + 1) if rnd else ''))

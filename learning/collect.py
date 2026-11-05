@@ -375,8 +375,12 @@ def _candidate(d, o, info, k, cfg, it, time_s, drc, only_place=False, prepared=F
             def collisions():
                 try: return (json.load(open(os.path.join(c, 'placement.json'))).get('metrics') or {}).get('after', {}).get('collisions')
                 except (OSError, ValueError): return None
+            def unsolvable():
+                try: return (json.load(open(os.path.join(c, 'placement.json'))).get('metrics') or {}).get('after', {}).get('unsolvable')
+                except (OSError, ValueError): return None
             for retry in range(2 if PLACEMENT_PROTECTION else 0):
                 if collisions() == 0: break
+                if unsolvable(): row['placer_unsolvable'] = unsolvable(); break
                 cmd = [x if not x.startswith('seed=') else 'seed=%d' % (cfg['seed'] + 7919 * (retry + 1)) for x in pcmd]
                 rp = PL.job(cmd, cpu_s=time_s, log=os.path.join(c, 'placer_repeat%d.log' % (retry + 1)), env=dict(os.environ, PYTHONHASHSEED='0'))
                 row['placer']['cpu_s'] += rp['cpu_s']

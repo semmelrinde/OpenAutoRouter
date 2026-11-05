@@ -260,6 +260,19 @@ def code_hashes():
                 netclasses_sha256=hashlib.sha256((Path(R) / 'analysis/netclasses.py').read_bytes()).hexdigest())
 
 
+KICAD_NATIVE_ERROR = os.path.expanduser('~/Library/Caches/Autorouter/native_error')
+
+
+def kicad_native_error_save(c, seed, kid, keep=60):
+    try:
+        goal = os.path.join(KICAD_NATIVE_ERROR, 'a%d_k%d' % (seed, kid)); os.makedirs(goal, exist_ok=True)
+        for f in ('board.json', 'netclasses.json', 'routes.json', 'routes_shape.json', 'champion_kicad_native/drc.json'):
+            if os.path.exists(os.path.join(c, f)): shutil.copy(os.path.join(c, f), os.path.join(goal, os.path.basename(f)))
+        all_items = sorted((os.path.getmtime(os.path.join(KICAD_NATIVE_ERROR, d)), d) for d in os.listdir(KICAD_NATIVE_ERROR))
+        for _, d in all_items[:-keep]: shutil.rmtree(os.path.join(KICAD_NATIVE_ERROR, d), ignore_errors=True)
+    except OSError: pass
+
+
 def code_verify(z):
     now = code_hashes()
     if any(z.get(k) != v for k, v in now.items()):
@@ -364,11 +377,16 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
         def _kol():
             try: return ((json.load(open(os.path.join(c, 'placement.json'))).get('metrics') or {}).get('after') or {}).get('collisions')
             except (OSError, ValueError): return None
+        def _unsolv():
+            try: return ((json.load(open(os.path.join(c, 'placement.json'))).get('metrics') or {}).get('after') or {}).get('unsolvable')
+            except (OSError, ValueError): return None
         z['placer_repeat'] = 0
 
 
         for w_ in range(0 if LOOSEN.active(cfg.get('placer_loosen')) else 2):
             if zp != 'ok' or _kol() == 0: break
+            if _unsolv():
+                z['placer_unsolvable'] = _unsolv(); break
             z['placer_repeat'] += 1
             pcmd2 = [x if not x.startswith('seed=') else 'seed=%d' % (cfg['seed'] + 7919 * (w_ + 1)) for x in pcmd]
             zp, cp2 = compute_run(pcmd2, budget, os.path.join(c, 'placer_repeat%d.log' % (w_ + 1))); cp += cp2
@@ -430,6 +448,7 @@ def _attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, cpu=No
         if logbook is not None:
             logbook.update(loaded); z = logbook
         else: z = loaded
+
         from learning.learning_effect import cpu_s
         preparation = cpu_s(loaded)
         if preparation is None:
@@ -762,7 +781,6 @@ def attempt(ad, A, cfg, k, time_s, it, only_place=False, prepared=False, total_c
     z.setdefault('s', 0.0)
     preparation_save()
     return z
-
 
 def dataset_capture(ad, A, z, k, only_place=False, cpu=None, candidates=3, candidates_auto=True):
     _tc_dense = time.thread_time()
@@ -1124,6 +1142,8 @@ def task_play(out, seed, kw, lines, rnd):
             print('  Task %d k%d %s factor %.2f %5.0f mm2 %s score %s  %4.0fs  %s' % (seed, kid, z['net_class'], factor, A['area_mm2'],
                   'unknown' if z['is_valid'] is None else 'valid ' if z['is_valid'] else 'invalid', z.get('score_v3'), z['s'],
                   '' if z['is_valid'] else 'confl %s open %s' % ((z.get('outcome') or {}).get('conflict_list'), (z.get('outcome') or {}).get('open_items'))), flush=True)
+            if not z['is_valid'] and str((z.get('outcome') or {}).get('is_valid')) == 'True':
+                kicad_native_error_save(os.path.join(ad, 'k%d' % kid), seed, kid)
             if not kw.get('keep') == '1' and not z['is_valid']: shutil.rmtree(os.path.join(ad, 'k%d' % kid), ignore_errors=True)
             if LOOSEN.request(z):
                 relaxation_here = True; locker_cfg = dict(cfg)
@@ -1189,7 +1209,6 @@ def teacher_play(out, seed, kw, lines, rnd):
     try:
         A = task_generate(ad, goal=default_target(explicit=kw.get('goal'), context='selfplay'), **args)
     except ValueError as e:
-
         teacher.reject(recipe, str(e))
         print('Teacher rejects proposal:', str(e), flush=True); return []
     new = []

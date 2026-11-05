@@ -52,7 +52,16 @@ class CpuTree:
         except PermissionError:
 
             rows = self.libproc_inventory()
-        descendants = {root} | set(self.nodes)
+
+
+
+
+        current = {pid for pid, _, _ in rows}
+        for pid in sorted(p for p in self.nodes if isinstance(p, int) and p != root and p in current):
+            u = Usage()
+            if self.lib.proc_pid_rusage(pid, 2, ctypes.byref(u)) == 0 and u.start != self.nodes[pid]['start']:
+                self.retire(pid)
+        descendants = {root} | {p for p in self.nodes if isinstance(p, int)}
         changed = True
         while changed:
             changed = False
@@ -78,10 +87,12 @@ class CpuTree:
                 continue
             old = self.nodes.get(pid)
             if old and old['start'] != u.start:
-                raise RuntimeError('PID change within a CPU budget')
+
+
+                self.retire(pid)
+                continue
             self.nodes[pid] = dict(parent=old['parent'] if old else parent, start=u.start,
                 own=(u.user + u.system)*self.seconds_per_tick, reaped=(u.child_user + u.child_system)*self.seconds_per_tick,
-
 
                 live=True)
         children = {}
@@ -98,12 +109,23 @@ class CpuTree:
         if root in self.nodes:
             self.maximum = max(self.maximum, sum(total(root)))
         return self.maximum
+    def retire(self, pid):
+        key = ('finished', pid, self.nodes[pid]['start'])
+        node = self.nodes.pop(pid)
+        node['live'] = False
+        for other in self.nodes.values():
+            if other['parent'] == pid:
+                other['parent'] = key
+        self.nodes[key] = node
+
     def kill(self, root):
 
 
 
         live = []
         for pid, node in list(self.nodes.items())[::-1]:
+            if not isinstance(pid, int):
+                continue
             u = Usage()
             if self.lib.proc_pid_rusage(pid, 2, ctypes.byref(u)) == 0 and u.start == node['start'] and not u.exit:
                 live.append(pid)

@@ -39,7 +39,17 @@ def one(goal, seed, kw):
                                'design_rules=design_rules.json', 'mode=new', 'image=pl'], log)
     apply(d)
     t['route'] = step([os.path.join(R, 'router/route_pf.py'), 'board_placed.json', 'routes.json', 'design_rules=design_rules.json',
-                           'netclasses=netclasses.json', 'iter=' + kw.get('iter', '30'), 'move=' + kw.get('move', '1'), 'png=rt'], log)
+                           'netclasses=netclasses.json', 'iter=' + kw.get('iter', '30'), 'move=' + kw.get('move', '1'), 'png=rt',
+                           'style=' + kw.get('style', '45')], log)
+    if kw.get('shaping', '45r') != 'raw_data':
+
+
+        from learning.shaping import shapes
+        t0 = time.time()
+        f = shapes(*[os.path.join(d, n) for n in ('board_placed.json', 'netclasses.json', 'routes.json', 'design_rules.json')],
+                   A.get('gnd_layers') or ['In1'], style=kw.get('shaping', '45r'), log=log + '.shaping')
+        t['route'] += time.time() - t0
+        with open(log, 'a') as fh: print('Shape %s: %s %s' % (f.get('style'), 'applied' if f.get('applied') else 'not applied', f.get('reason') or ''), file=fh)
     try:
         step([os.path.join(R, 'analysis/evaluation.py'), 'board_placed.json', 'routes.json', 'netclasses.json', 'json=evaluation.json', 'image=bw'], log)
         E = json.load(open('evaluation.json'))

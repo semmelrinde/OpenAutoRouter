@@ -63,11 +63,11 @@ def coupling(R, K, victim=None, aggressor=None):
                 p = _pair(a, b, c, d)
                 if p is None: continue
                 long, middle, xy = p
-                edge = middle - w / 2 - w2 / 2
-                if edge >= gap_width: continue
-                amount = long * wt * min(4.0, gap_width / max(edge, gap_width / 4))
+                edge_clr = middle - w / 2 - w2 / 2
+                if edge_clr >= gap_width: continue
+                amount = long * wt * min(4.0, gap_width / max(edge_clr, gap_width / 4))
                 total_sum += amount; per[n] += amount
-                sites.append((round(amount, 3), n, m, L, round(xy[0], 3), round(xy[1], 3), round(long, 3), round(edge, 3)))
+                sites.append((round(amount, 3), n, m, L, round(xy[0], 3), round(xy[1], 3), round(long, 3), round(edge_clr, 3)))
     sites.sort(reverse=True)
     return dict(total_sum=round(total_sum, 2), per_victim={k: round(v, 2) for k, v in sorted(per.items(), key=lambda x: -x[1])}, sites=sites)
 

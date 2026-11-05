@@ -93,6 +93,15 @@ def _mass_expression(s):
     value=float(m[1]);return value*.0254 if m[2] in ('mil','th') else value*25.4 if m[2]=='in' else value
 
 
+_INNER = re.compile(r"^\s*A\.Type\s*==\s*'Pad'\s*&&\s*B\.Type\s*==\s*'Pad'\s*&&\s*A\.memberOfFootprint\('([^']+)'\)\s*&&\s*"
+                    r"B\.memberOfFootprint\('([^']+)'\)\s*$")
+
+
+def _inside_footprint(cond):
+    m = _INNER.match(cond or '')
+    return bool(m) and m.group(1) == m.group(2) and not any(ch in m.group(1) for ch in '*?')
+
+
 def contract_spec(board=None, design_rules=None, project=None, dru=None):
     board = board or {}; design_rules = design_rules or {}; project = project or {}
     old = design_rules.get('spacings') or {}
@@ -126,6 +135,7 @@ def contract_spec(board=None, design_rules=None, project=None, dru=None):
     for r in raw_rules:
         c = r.get('constraints', {}).get('clearance')
         if c is None: continue
+        if _inside_footprint(r.get('cond', '')): continue
         try:
             expr=((r.get('constraints_expression') or {}).get('clearance') or {}).get('min')
             if expr is not None:

@@ -131,6 +131,11 @@ if [ "${LOOSE:-1}" = "1" ]; then
     take ${N}_loose.kicad_pcb "Loose remnants, round $r (R24 d)" loose=1 || break
   done
 fi
+if [ "${THERMAL_SPOKES:-1}" = "1" ] && grep -q 'starved_thermal' drc_$N.json 2>/dev/null; then
+  rm -rf ${N}_ts.kicad_pcb ${N}_ts_thermal_spokes; cp $N.kicad_pcb ${N}_ts.kicad_pcb; proj ${N}_ts.kicad_pcb
+  PYTHONPATH=$R $VPY -m postprocessing.thermal_spokes ${N}_ts.kicad_pcb 2>&1 | grep -E '"(before|after|taken)"' | tr -d '\n '; echo
+  take ${N}_ts.kicad_pcb "Thermal spokes (E125)" || true
+fi
 if [ "${CURRENT_PATH_AREAS:-0}" = "1" ]; then
   if [ -n "$NETCLASSES" ]; then
     if $R/postprocessing/current_path_run.sh $N.kicad_pcb ${N}_sf.kicad_pcb $NETCLASSES ${SF_GAP:-${ZCLR:-0.2}} ${SF_EDGE:-$ZONE_EDGE}; then

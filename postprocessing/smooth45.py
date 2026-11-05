@@ -39,27 +39,30 @@ def _merge(pts):
 
 
 class Layer:
-    def __init__(self, B, R, L, d_via):
-        self.geo, self.net_name = [], []
+    def __init__(self, B, R, L, d_via, pad_spacing=0.0):
+        self.geo, self.net_name, self.pad = [], [], []
+        self.pad_spacing = pad_spacing
         for t in R.get('tracks', []):
             if t['layer'] != L: continue
             for a, b, w in zip(t['pts'][:-1], t['pts'][1:], t['w']):
                 self.geo.append((LineString([a, b]) if a != b else Point(a)).buffer(w / 2, QS)); self.net_name.append(t.get('net', ''))
         for v in R.get('vias', []):
             self.geo.append(Point(v['x'], v['y']).buffer(d_via / 2, QS)); self.net_name.append(v.get('net', ''))
+        self.pad = [False] * len(self.geo)
         for p in B['pads']:
             for q in (p.get('polys') or {}).get(L, []):
-                if len(q) >= 3: self.geo.append(Polygon(q).buffer(0)); self.net_name.append(p['net'])
+                if len(q) >= 3: self.geo.append(Polygon(q).buffer(0)); self.net_name.append(p['net']); self.pad.append(True)
             if p.get('drill') and not (p.get('polys') or {}).get(L):
-                self.geo.append(Point(p['x'], p['y']).buffer(p['drill'] / 2, QS)); self.net_name.append('#drill_hole')
+                self.geo.append(Point(p['x'], p['y']).buffer(p['drill'] / 2, QS)); self.net_name.append('#drill_hole'); self.pad.append(False)
         for n, L2, g in B.get('areas', ()):
-            if L2 == L: self.geo.append(g); self.net_name.append(n)
+            if L2 == L: self.geo.append(g); self.net_name.append(n); self.pad.append(False)
         self.tree_idx = STRtree(self.geo) if self.geo else None
 
     def vacant(self, g, net_name, spacing):
         if self.tree_idx is None: return True
-        for i in self.tree_idx.query(g.buffer(spacing, 4)):
-            if self.net_name[i] != net_name and self.geo[i].distance(g) < spacing: return False
+        wide = max(spacing, self.pad_spacing)
+        for i in self.tree_idx.query(g.buffer(wide, 4)):
+            if self.net_name[i] != net_name and self.geo[i].distance(g) < (wide if self.pad[i] else spacing): return False
         return True
 
 
@@ -111,6 +114,8 @@ def _tighten(pts, w, n, lg, inner, keepout, clr, hmax=0.0, before=None, post=Non
 def smooth(B, R, clr=None, border=None, metadata=True, keepout_list=None, anchor=None, prev_obstacle=False, hmax=None, corners_protection=False):
     keepout_list = set(keepout_list or ()); anchor = anchor or {}; old = []
     clr = (clr if clr is not None else float(R.get('clr') or (R.get('options') or {}).get('clr') or 0.1)) + 0.002
+    _dp = (R.get('options') or {}).get('drcpad')
+    clr_pad = float(_dp) + 0.002 if _dp not in (None, '') else 0.0
     border = border if border is not None else float((R.get('options') or {}).get('edge') or 0.2)
     d_via, _ = _via_ground(R)
     inner = unary_union([Polygon(o).buffer(0) for o in B['outline'] if len(o) >= 3]).buffer(-border, QS)
@@ -130,7 +135,7 @@ def smooth(B, R, clr=None, border=None, metadata=True, keepout_list=None, anchor
     for t in R.get('tracks', []): group_list[(t.get('net', ''), t['layer'])].append(t)
     new = {}; changed = 0; chains_n = 0
     for L in sorted({t['layer'] for t in R.get('tracks', [])}):
-        lg = Layer(B, R, L, d_via)
+        lg = Layer(B, R, L, d_via, clr_pad)
         for (n, L2) in sorted(group_list):
             if L2 != L or not n or n in keepout_list: continue
             fixed_extra = anchor.get((n, L), set())
@@ -195,7 +200,7 @@ def smooth(B, R, clr=None, border=None, metadata=True, keepout_list=None, anchor
 
                 if prev_obstacle: old += [t for t in R['tracks'] if t.get('net', '') == n and t['layer'] == L]
                 R['tracks'] = [t for t in R['tracks'] if not (t.get('net', '') == n and t['layer'] == L)] + new_t
-                lg = Layer(B, dict(R, tracks=R['tracks'] + [t for t in old if t['layer'] == L]) if prev_obstacle else R, L, d_via)
+                lg = Layer(B, dict(R, tracks=R['tracks'] + [t for t in old if t['layer'] == L]) if prev_obstacle else R, L, d_via, clr_pad)
     L1 = sum(math.dist(a, b) for t in R.get('tracks', []) for a, b in zip(t['pts'][:-1], t['pts'][1:]))
     return dict(chain_list=chains_n, changed=changed, length_before=round(L0, 1), length_after=round(L1, 1))
 
@@ -237,16 +242,16 @@ def implicit_anchor(R, B=None):
 def via_middle(R):
     d_via, _ = _via_ground(R)
     vias = defaultdict(list)
-    for v in R.get('vias', []): vias[v.get('net', '')].append((v['x'], v['y']))
+    for v in R.get('vias', []): vias[v.get('net', '')].append((v['x'], v['y'], float(v.get('d') or d_via)))
     n = 0
     for t in R.get('tracks', []):
         if len(t['pts']) < 2: continue
         for end in (0, -1):
             p = tuple(t['pts'][end])
-            for c in vias.get(t.get('net', ''), []):
-                dd = math.dist(p, c)
-                if 1e-3 < dd < d_via / 2 - 1e-4:
-                    w = t['w'][0] if end == 0 else t['w'][-1]
+            w = t['w'][0] if end == 0 else t['w'][-1]
+            for cx, cy, dv in vias.get(t.get('net', ''), []):
+                c = (cx, cy); dd = math.dist(p, c)
+                if 1e-3 < dd < dv / 2 - 1e-4 and dd + w / 2 <= dv / 2 + 1e-6:
                     if end == 0: t['pts'].insert(0, [c[0], c[1]]); t['w'].insert(0, w)
                     else: t['pts'].append([c[0], c[1]]); t['w'].append(w)
                     if t.get('items'):

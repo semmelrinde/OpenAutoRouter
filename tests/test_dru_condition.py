@@ -43,6 +43,28 @@ class Condition(unittest.TestCase):
         r = [dict(name='x', cond="A.Unknown == 'y'", constraints=dict(track_width=dict(min=0.3)))]
         self.assertEqual(min_width(r, 'SIG', 'Default', ['F.Cu'], NETS, 0.1)[0], {'F.Cu': 0.3})
 
+    def test_tasks_dru_only_at_generator(self):
+        import tempfile
+        from pathlib import Path
+        from common.dru_condition import tasks_dru
+        with tempfile.TemporaryDirectory() as t:
+            rg = Path(t) / 'design_rules.json'
+            self.assertIsNone(tasks_dru(str(rg), {'source': 'learning/tasks.py'}))
+            (Path(t) / 'board.kicad_dru').write_text('(version 1)\n')
+            self.assertEqual(tasks_dru(str(rg), {'source': 'learning/tasks.py'}), Path(t) / 'board.kicad_dru')
+            self.assertIsNone(tasks_dru(str(rg), {'source': '/somewhere/other.kicad_pcb'}))
+            self.assertIsNone(tasks_dru(None, {'source': 'learning/tasks.py'}))
+
+    def test_pad_pair_in_same_part_no_clearance_contract(self):
+        from analysis.spacings import contract_spec
+        inner = dict(name='inner', cond="A.Type == 'Pad' && B.Type == 'Pad' && A.memberOfFootprint('C1') && B.memberOfFootprint('C1')",
+                     constraints=dict(clearance=dict(min=0.09)))
+        foreign = dict(inner, name='foreign', cond="A.Type == 'Pad' && B.Type == 'Pad' && A.memberOfFootprint('C1') && B.memberOfFootprint('C2')")
+        pa = dict(name='pa', cond="A.NetClass == 'Power' && B.NetClass == 'Analog'", constraints=dict(clearance=dict(min=0.3)))
+        v = contract_spec({}, {}, dru=[inner, foreign, pa])
+        self.assertEqual([r['name'] for r in v['dru']], ['pa'])
+        self.assertEqual([u['name'] for u in v['unknown']], ['foreign'])
+
 
 if __name__ == '__main__':
     unittest.main()

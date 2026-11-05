@@ -7,7 +7,8 @@ H = json.load(open(sys.argv[1])); NET = sys.argv[2]; X0, Y0, X1, Y1 = map(float,
 A = dict(a.split('=', 1) for a in sys.argv[7:-1]); OUT = sys.argv[-1]
 LAG = A.get('cu_layers', 'B,In5,In2').split(','); VLAY = LAG + [L for L in A.get('via_layers', 'F').split(',') if L and L not in LAG]; IGN = set(A.get('ignore', '').split(','))
 VIAK = float(A.get('via', 1.2)); BEND = float(A.get('bend', 0.25)); G = 0.025
-W = 0.1; CL_T = 0.09; CL_P = 0.10; MARG = 0.02; VM = float(A.get('via_margin', 0.005)); VD = 0.45; VDR = 0.2; HH = 0.2; HCL = 0.2
+W = float(A.get('w', 0.1)); CL_T = float(A.get('clt', 0.09)); CL_P = float(A.get('clp', 0.10)); MARG = 0.02; VM = float(A.get('via_margin', 0.005))
+VD = float(A.get('vd', 0.45)); VDR = float(A.get('vdr', 0.2)); HH = float(A.get('hh', 0.2)); HCL = 0.2
 def own(n): return n == NET or n.endswith('/' + NET.split('/')[-1]) and NET.split('/')[-1] in n
 obs_t = {L: [] for L in VLAY}; obs_v = {L: [] for L in VLAY}; holes = []
 for t in H['tracks']:
@@ -18,10 +19,13 @@ for t in H['tracks']:
     obs_t[t['layer']].append(g.buffer(t['w'] / 2 + CL_T + W / 2 + MARG, 8))
     obs_v[t['layer']].append(g.buffer(t['w'] / 2 + CL_T + VD / 2 + VM, 8))
 for p in H['pads']:
+    if own(p['net']) and A.get('via_in_pad') == '0' and p['layer'] in VLAY:
+        obs_v[p['layer']].append(Polygon(p['poly']).buffer(VD / 2 + VM, 8))
     if own(p['net']) or p['layer'] not in VLAY: continue
     g = Polygon(p['poly'])
     obs_t[p['layer']].append(g.buffer(CL_P + W / 2 + MARG, 8)); obs_v[p['layer']].append(g.buffer(CL_P + VD / 2 + VM, 8))
 for v in H['vias']:
+    if v.get('uuid') in IGN: continue
     c = Point(v['x'], v['y'])
     holes.append(c.buffer(v['drill'] / 2 + HH + VDR / 2 + VM, 16))
     if own(v['net']): continue
@@ -33,6 +37,18 @@ for k in H['keepouts']:
         if L not in VLAY: continue
         if k['tracks']: obs_t[L].append(g.buffer(W / 2 + MARG, 4))
         if k['vias']: obs_v[L].append(g.buffer(VD / 2 + VM, 4))
+if A.get('zone_list') == '1':
+    FREE = set(A.get('zones_free', 'GND').split(','))
+    for z in H.get('zone_list', []):
+        if own(z['net']) or z['net'] in FREE or z['layer'] not in VLAY: continue
+        g = Polygon(z['outer'], z.get('holes', []))
+        obs_t[z['layer']].append(g.buffer(CL_T + W / 2 + MARG, 8))
+        if A.get('zones_via') == '1': obs_v[z['layer']].append(g.buffer(CL_T + VD / 2 + VM, 8))
+if float(A.get('border', 0)) > 0:
+    RD = float(A['border'])
+    for e in H.get('edges', []):
+        g = LineString(e + e[:1])
+        for L in VLAY: obs_t[L].append(g.buffer(RD + W / 2 + MARG, 8)); obs_v[L].append(g.buffer(RD + VD / 2 + VM, 8))
 nx = int(round((X1 - X0) / G)) + 1; ny = int(round((Y1 - Y0) / G)) + 1
 xs = X0 + np.arange(nx) * G; ys = Y0 + np.arange(ny) * G
 from shapely import contains_xy

@@ -85,7 +85,7 @@ def net_graph(tracks, vias, pads, tol=0.03, endpoints=False):
                 ends[L].append(q); split[pi].append((L, q))
     endtree = {L: STRtree([Point(q) for q in Q]) for L, Q in ends.items()}
     adj = collections.defaultdict(list)
-    def edge(a, b, kid):
+    def edge_clr(a, b, kid):
         adj[a].append((b, kid)); adj[b].append((a, kid))
     for ti, t in enumerate(tracks):
         L = t['layer']
@@ -100,10 +100,10 @@ def net_graph(tracks, vias, pads, tol=0.03, endpoints=False):
             part.sort()
             for (s1, p1), (s2, p2) in zip(part[:-1], part[1:]):
                 if math.dist(p1, p2) < 1e-9: continue
-                edge(net_copper(L, *p1), net_copper(L, *p2), ('s', ti, si, s1, s2))
+                edge_clr(net_copper(L, *p1), net_copper(L, *p2), ('s', ti, si, s1, s2))
     for vi, v in enumerate(vias):
         ks = [net_copper(L, v['x'], v['y']) for L in cu_layers]
-        for k in ks[1:]: edge(ks[0], k, ('v', vi))
+        for k in ks[1:]: edge_clr(ks[0], k, ('v', vi))
     pad_pts = {}
     for pi, p in enumerate(pads):
         pk = ('PAD', p['ref'], p['num']); pad_pts['%s:%s' % (p['ref'], p['num'])] = pk
@@ -114,13 +114,13 @@ def net_graph(tracks, vias, pads, tol=0.03, endpoints=False):
             for qi in sorted(pttree[L].query(box(x0 - tol, y0 - tol, x1 + tol, y1 + tol))):
                 q = points[L][int(qi)]
                 if G[L].distance(Point(q)) <= tol if not endpoints else G[L].covers(Point(q)):
-                    edge(pk, net_copper(L, *q), None)
-        for L, q in split[pi]: edge(pk, net_copper(L, *q), None)
+                    edge_clr(pk, net_copper(L, *q), None)
+        for L, q in split[pi]: edge_clr(pk, net_copper(L, *q), None)
         for vi in sorted(vitree.query(box(x0, y0, x1, y1))):
             v = vias[int(vi)]; border = via_radius(v) + tol
             if x0 - border <= v['x'] <= x1 + border and y0 - border <= v['y'] <= y1 + border and \
                     min(G[L].distance(Point(v['x'], v['y'])) for L in p['layers'] if L in G) <= (tol if endpoints else via_radius(v) + tol):
-                for L in cu_layers: edge(pk, net_copper(L, v['x'], v['y']), None)
+                for L in cu_layers: edge_clr(pk, net_copper(L, v['x'], v['y']), None)
     padtree = STRtree([box(*p['bbox']) for p in pads])
     for i, p in enumerate(pads):
         for j in sorted(int(j) for j in padtree.query(box(*p['bbox'])) if int(j) > i):
@@ -128,7 +128,7 @@ def net_graph(tracks, vias, pads, tol=0.03, endpoints=False):
             gem = set(p['layers']) & set(q['layers']) & set(geo[i]) & set(geo[j])
             if gem and p['bbox'][0] <= q['bbox'][2] and q['bbox'][0] <= p['bbox'][2] and p['bbox'][1] <= q['bbox'][3] \
                     and q['bbox'][1] <= p['bbox'][3] and any(geo[i][L].distance(geo[j][L]) <= 1e-6 for L in gem):
-                edge(pad_pts['%s:%s' % (p['ref'], p['num'])], pad_pts['%s:%s' % (q['ref'], q['num'])], None)
+                edge_clr(pad_pts['%s:%s' % (p['ref'], p['num'])], pad_pts['%s:%s' % (q['ref'], q['num'])], None)
     return dict(adj=adj, pad_pts=pad_pts, cu_layers=cu_layers)
 
 

@@ -138,7 +138,7 @@ class Map:
             for c in d['corridors']:
                 g=LineString(c['centerline']).buffer(c['demand_mm']/2,cap_style=2,join_style=2)
                 if g.area>1e-10:
-                    self.reserve.append((n,c['layer_name'],g,owners,'edge'))
+                    self.reserve.append((n,c['layer_name'],g,owners,'edge_clr'))
                     self.capacity.append((c['centerline'],c['demand_mm'],None))
             for f in d['via_fields']:
                 g,pitch=field_shape(f['middle'],f['count_nominal'],f['via_d_mm'],f['drill_mm'],self.clr,self.h2h)
@@ -231,7 +231,7 @@ class Map:
                     if field is not None:
                         baseline=field_free(field,Polygon(),self.outline,h2h=self.h2h)
                         blockage=max(blockage,(baseline-field_free(field,obstacle,self.outline,holes,self.h2h))/field[1])
-                    val += blockage * (3 if kind!='edge' else 1)
+                    val += blockage * (3 if kind!='edge_clr' else 1)
                 obstacles={L:g.buffer(self.pitch/2) for L,g in gs.items()};fancost={}
                 for i in self.fantree.query(g.buffer(self.pitch/2)):
                     anchor,L,side,demand,cut=self.fancuts[i]

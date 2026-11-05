@@ -107,11 +107,21 @@ if BUDGET_WORK:
             raise ValueError('budget=work does not support %s yet' % _name)
 _WORK = dict(unit=0, astar=0, checking=0)
 _WORK_MARKS = []
+_BGA_REST_BUDGET = [False]
+
+
+class _BgaRestBudget(BaseException):
+    pass
 
 
 def work_step(category):
     work_emergency_stop()
+    if _BGA_REST_BUDGET[0]:
+        if ((BUDGET_WORK and work_total() >= .95 * WORK_MAX) or
+                (not BUDGET_WORK and globals().get('CPU_MAX', 0) > 0 and time.process_time() >= .95 * CPU_MAX)):
+            raise _BgaRestBudget()
     if WORK_MEASURE: _WORK[category] += 1
+
 
 def work_emergency_stop():
     if BUDGET_WORK and globals().get('CPU_MAX', 0) > 0 and time.process_time() >= CPU_MAX:
@@ -146,6 +156,11 @@ def budget_rng(salt):
 
 
 
+def _native_original_zones_contract(options, zones):
+    if not (options.get('bga_rest')=='1' or options.get('skew_shapes')=='entire'):return False
+    if not options.get('kicad_native_zones') or not isinstance(zones,list) or not zones:return False
+    if not all(isinstance(z,dict) and z.get('zone_id') and z.get('native_layers') and z.get('native_outlines') for z in zones):return False
+    return len({z['zone_id'] for z in zones})==len(zones)
 def native_route_verify(board, routes, options, folder, export=False):
     import shutil
     from common import slots as PL
@@ -171,9 +186,22 @@ def native_route_verify(board, routes, options, folder, export=False):
         (folder/'runs.json').write_text(json.dumps(runs, indent=2))
         if r['cur_state'] != 'ok': raise RuntimeError('Native acceptance '+tag+': '+str(r))
     pcb = folder/'board.kicad_pcb'
-    call('import', python_command(root/'kicad/import_routes.py', folder/'base.kicad_pcb', rp,
-         folder/'zones.json', pcb, 'project=1', 'cu_layers='+str(board.get('cu_layers',4)),
-         'via='+options.get('via', (rules.get('router') or {}).get('via','0.45/0.20'))))
+    original=False
+    if _native_original_zones_contract(options,zones):
+
+
+
+        (folder/'.real_curve').touch()
+        call('zones_contract',python_command(root/'learning/real_curve_kicad_native.py','zone_list',folder/'base.kicad_pcb',folder/'original.zones.json'))
+        native=json.loads((folder/'original.zones.json').read_text())
+        original=({z['zone_id']:z for z in native}=={z['zone_id']:z for z in zones})
+        (folder/'zones_contract.json').write_text(json.dumps(dict(native_originals=original,count=len(zones))))
+    extra=['cu_layers='+str(board.get('cu_layers',4)), 'via='+options.get('via',(rules.get('router') or {}).get('via','0.45/0.20'))]
+    if original:
+        call('import',python_command(root/'learning/real_curve_kicad_native.py','import_',folder/'base.kicad_pcb',pcb,rp,folder/'zones.json',*extra))
+    else:
+        call('import', python_command(root/'kicad/import_routes.py', folder/'base.kicad_pcb', rp,
+             folder/'zones.json', pcb, 'project=1', *extra))
     cli = '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'
     call('drc', [cli,'pcb','drc','--format','json','--severity-all','-o',folder/'drc.json',pcb])
     d = json.loads((folder/'drc.json').read_text())
@@ -259,6 +287,8 @@ def multi_attempts(board_path, out, options, count):
 
 if args.get('skew', '0') not in ('0', '1'):
     raise ValueError('skew must be 0 or 1')
+if args.get('skew_shapes', '0') not in ('0', 'entire'):
+    raise ValueError('skew_shapes must be 0 or full')
 if 'attempts' in args:
     _attempts = int(args['attempts'])
     if _attempts < 0: raise ValueError('attempts must be a nonnegative integer')
@@ -424,7 +454,12 @@ def _hole_free(g):
 
 DESIGN_RULES_STRUCTURE = json.load(open(args['design_rules'])).get('structure') if 'design_rules' in args else None
 if 'design_rules' in args:
-    for _k, _v in json.load(open(args['design_rules']))['router'].items(): args.setdefault(_k, str(_v))
+    _rg = json.load(open(args['design_rules']))
+    for _k, _v in _rg['router'].items(): args.setdefault(_k, str(_v))
+
+
+    if 'netclasses' in args and 'hole_clr' not in args and args.get('hole_off_raw', '1') == '1' and (_rg.get('raw_data') or {}).get('min_hole_clearance'):
+        args['hole_clr'] = str(_rg['raw_data']['min_hole_clearance'])
 
 if args.get('keepout_list', '1') == '1' and D.get('keepouts'):
 
@@ -714,7 +749,13 @@ BGA_FANOUT = NC is not None and ((NLAY >= 6 and args.get('bga_fanout', '0') == '
 BGA_PLAN = BGA_FANOUT and (args.get('bga_plan', '0') == '1' or BGA_ESCAPE)
 if BGA_ESCAPE: args.setdefault('bga_budget', '1')
 BGA_TIGHT = BGA_PLAN and args.get('bga_lanes', '0') == '1'
+if args.get('bga_rest', '0') not in ('0', '1'):
+    raise ValueError('bga_rest must be 0 or 1')
+BGA_REST = args.get('bga_rest', '0') == '1'
+if BGA_REST and (NC is None or NLAY < 4):
+    raise ValueError('bga_rest=1 needs netclasses= and at least four layers')
 PAD_EXTRA = 0.000001 if BGA_TIGHT else 0.006
+
 
 POTENTIAL_PLAN = None
 LAYER_STACK = False
@@ -855,7 +896,7 @@ for k, p in enumerate(D['pads']):
         p.setdefault('cells', {})[L] = np.flatnonzero(m_core)
         p.setdefault('bcells', {})[L] = np.flatnonzero(m_buf)
 def pad_hull(p, L, spacing, model):
-    poly = shapely.union_all([Polygon(q) for q in p['polys'][L]])
+    poly = core_set = shapely.union_all([Polygon(q) for q in p['polys'][L]])
     mk = (p.get('mask') or {}).get(L, 0.0)
     if model and mk > spacing:
         poly = poly.buffer(mk - spacing + 0.01, join_style=2)
@@ -864,10 +905,15 @@ def pad_hull(p, L, spacing, model):
         hole = hole.buffer(max(0.0, HOLE_CLR - spacing), 32)
         poly = shapely.union_all([poly, hole])
     elif HOLE_CLR > spacing and p.get('drill', 0) > 0:
-        hole = Point(p['x'], p['y']).buffer(p['drill'] / 2 + HOLE_CLR - spacing, 32)
+
+        hole = (shapely.union_all([Polygon(q) for q in p['hole_polys']]).buffer(HOLE_CLR - spacing, 32) if NC is not None and p.get('hole_polys')
+                else Point(p['x'], p['y']).buffer(p['drill'] / 2 + HOLE_CLR - spacing, 32))
         poly = shapely.union_all([poly, hole])
     if not model and mk > spacing:
         poly = poly.buffer(mk - spacing + 0.01, join_style=2)
+    if p.get('clearance', 0.0) > DRCP + 1e-6:
+
+        poly = shapely.union_all([poly, core_set.buffer(p['clearance'] - DRCP, 32)])
     return poly
 
 
@@ -978,6 +1024,9 @@ if NC is not None and args.get('dru_width', '1') == '1':
     if _rg.get('circuit_board'): _dq = Path(_rg['circuit_board']).with_suffix('.kicad_dru')
     elif str(D.get('src', '')).endswith('.kicad_pcb'): _dq = Path(D['src']).with_suffix('.kicad_dru')
     else: _dq = Path(sys.argv[1]).with_suffix('.kicad_dru')
+    if not _dq.exists() and 'design_rules' in args:
+        from common.dru_condition import tasks_dru as _task_dru
+        _dq = _task_dru(args['design_rules'], _rg) or _dq
     if _dq is not None and _dq.exists():
         from analysis.design_rules import dru_rules as _dru_rules
         from common.dru_condition import min_width as _dru_mb
@@ -988,6 +1037,7 @@ if NC is not None and args.get('dru_width', '1') == '1':
             _m, _nm = _dru_mb(_dr, _n, (D.get('netclass') or {}).get(_n, 'Default'), _dl, _dn, TRACK_MIN)
             if _nm and max(_m.values()) > TRACK_MIN: DRU_MIN[_n] = max(_m.values())
         if DRU_MIN: print('DRU minimum widths (E95): %d nets, %s' % (len(DRU_MIN), sorted(set(DRU_MIN.values()))), flush=True)
+
 
 def cls(net):
     C = _cls(net)
@@ -1737,7 +1787,7 @@ def current_correct(u, C):
             for dk,sp in sb:
                 limit=min(limit,2*(line_cap_min(dk[li],a,b)-sp))
                 for lj,s in neighbor_spacing(li,sp):limit=min(limit,2*(line_cap_min(dk[lj],a,b)-s))
-            t['w'][si]=max(w,min(target,limit))
+            t['w'][si]=max(w,min(target,_edge_width(a,b,limit)))
         widths[ti]=t['w']
 
 
@@ -1941,6 +1991,10 @@ TAP_NC = TAPS and bool(NC) and 'taps' in NC and args.get('taps_source', 'netclas
 WINDOW = float(args.get('window', '0'))
 CONFLICT_SITE_EXACT = args.get('conflict_site', '') == 'exact'
 NECK = float(args.get('neck', '0')); NECK_CACHE = {}
+
+
+
+NECK_AUTO = float(args.get('neck_auto', '0')); NECK_NETS = set()
 _NECK_MAX = max(4, int(float(args.get('neck_mb', '600')) * 1e6 / (NL * NN * 4)))
 
 
@@ -1950,13 +2004,9 @@ HFAC = float(args.get('astar', '1'))
 BEND = float(args.get('bend', '0'))
 if not math.isfinite(BEND) or BEND < 0: raise ValueError('bend must be finite and >= 0')
 
-
 BEND_CURRENT = float(args.get('bend_current', '1'))
 if not math.isfinite(BEND_CURRENT) or BEND_CURRENT < 0: raise ValueError('bend_current must be finite and >= 0')
 VIA_TOO = [None]
-
-
-
 
 VIA_WEB = float(args.get('via_web', '0.03'))
 NECK_W = float(args.get('neck_w', args.get('sigw', '0.15') if NC else '0.25'))
@@ -2927,7 +2977,7 @@ def _unreachable(K, src, tgt):
 def neck_active(net, C, wmin, stub=False):
     if wmin <= max(NECK_W, DRU_MIN.get(net, 0.)) or net not in by_net_g: return False
     fld = NECK_FIELD and any(net in f[5] for f in DENSE)
-    if C.get('prio', 8) < 8: return NECK > 0 or fld
+    if C.get('prio', 8) < 8: return NECK > 0 or fld or net in NECK_NETS
     return (stub or BGA_TIGHT) and fld
 
 
@@ -2939,14 +2989,15 @@ def neck_field_map(net, C, wmin, stub=False):
     while len(NECK_CACHE) >= _NECK_MAX: del NECK_CACHE[next(iter(NECK_CACHE))]
     WMINF = np.full(NL * NN, wmin, dtype=np.float32); NECK_CACHE[(net, wmin)] = WMINF
     hw = max(NECK_W, DRU_MIN.get(net, 0.))
-    if NECK > 0 and C.get('prio', 8) < 8:
+    radius = NECK if NECK > 0 else NECK_AUTO if net in NECK_NETS else 0.
+    if radius > 0 and C.get('prio', 8) < 8:
         m = np.zeros(NL * NN, dtype=bool)
         for k in by_net_g[net]:
             for L, cells in D['pads'][k]['cells'].items(): m[LI[L] * NN + cells] = True
         for li in range(NL):
             sl = slice(li * NN, (li + 1) * NN)
             if m[sl].any():
-                near = _edt(~m[sl].reshape(NY, NX)) * RES <= NECK
+                near = _edt(~m[sl].reshape(NY, NX)) * RES <= radius
                 WMINF[sl][near.ravel()] = hw
     if NECK_FIELD:
         for lg, ix0, ix1, iy0, iy1, net_list in DENSE:
@@ -4248,6 +4299,7 @@ def path_to_geometry(path, capC, C):
                 if C.get('ground_map') is not None:
                     _bk = float(C['ground_map'][li * NN + int(((pa[1] + pb[1]) / 2 - Y0) / RES) * NX + int(((pa[0] + pb[0]) / 2 - X0) / RES)])
                     if _bk < _bo: _bo = _bk
+                if 'dru_min' in C: _bo = max(_bo, C['dru_min'])
                 wv = max(TRACK_MIN, _bo, math.floor(wv * 40) / 40)
                 if C.get('current_w'): wv = current_segment_width(C,min(line_cap_min(capL,pa,pb), 2*pad_room_min(li,pa,pb,NET_CUR[0],C['w']/2)))
                 if C.get('zw'): wv = C['zw'][li]
@@ -5760,6 +5812,36 @@ if RET > 0:
 RV_STAT = dict(assigned=0, already=0, no_slot=0, post_run_new=0, post_run_way=0)
 
 
+
+
+RV_DOM = {}; RV_DOM_MASK = {}; RV_DOM_INNER = {}; RV_DOM_PADS = None
+RET_BORDER = float(args.get('ret_border', '1.0'))
+if RET > 0 and not PLANE_LAYER and args.get('ret_regions', '1') == '1':
+    _rvd_nets = sorted(n for n in GNDS & AREA_NETS if any(p['net'] == n for p in D['pads']))
+    if len(_rvd_nets) >= 2:
+        _rvd_pt = {}
+        for _p in D['pads']:
+            if _p['net'] in _rvd_nets: _rvd_pt.setdefault((round(_p['x'], 4), round(_p['y'], 4)), set()).add(_p['net'])
+        _rvd_pt = sorted((xy, sorted(nn)[0]) for xy, nn in _rvd_pt.items() if len(nn) == 1)
+        RV_DOM_PADS = (np.array([xy for xy, _ in _rvd_pt], dtype=np.float64), [n for _, n in _rvd_pt])
+        _rvd_outlines = shapely.union_all([Polygon(o) for o in D['outline']]).buffer(0)
+        _rvd_cells = shapely.voronoi_polygons(shapely.MultiPoint([xy for xy, _ in _rvd_pt]), extend_to=_rvd_outlines.envelope.buffer(5), ordered=True)
+        for _n in _rvd_nets:
+            _g = shapely.union_all([c for c, (_, n) in zip(_rvd_cells.geoms, _rvd_pt) if n == _n]).intersection(_rvd_outlines)
+            RV_DOM[_n] = _g
+            _xx, _yy = np.meshgrid(GXc, GYc)
+            RV_DOM_MASK[_n] = shapely.contains_xy(_g, _xx, _yy)
+            RV_DOM_INNER[_n] = shapely.contains_xy(_g.buffer(-RET_BORDER), _xx, _yy)
+        print('Return vias (E123): %d ground regions without plane contours (%s), return vias >= %.1f mm inside' % (
+            len(RV_DOM), ', '.join('%s %.0f mm2' % (n, g.area) for n, g in sorted(RV_DOM.items())), RET_BORDER), flush=True)
+RV_LOCAL = bool(PLANE_LAYER) or bool(RV_DOM)
+
+
+def _rv_region(x, y):
+    xy, nn = RV_DOM_PADS
+    return nn[int(np.argmin((xy[:, 0] - x) ** 2 + (xy[:, 1] - y) ** 2))]
+
+
 def rv_radius(net):
     if RET <= 0: return 0.0
     k = NC['net_list'].get(net) or {}
@@ -5776,13 +5858,14 @@ def _rv_gnd(net_name):
 def rv_map(net, box, VC):
     R = rv_radius(net)
     if R <= 0: return None
-    if PLANE_LAYER:
-        local={g:_rv_map_net(g,box,VC,R) for g in sorted(GNDS & PLANE_AREA.keys())}
+    if RV_LOCAL:
+        masks = PLANE_MASK if PLANE_LAYER else RV_DOM_MASK
+        local={g:_rv_map_net(g,box,VC,R) for g in sorted(GNDS & (PLANE_AREA.keys() if PLANE_LAYER else RV_DOM_MASK.keys()))}
         if not local:return None
 
         via_extra=np.full(NN,np.float32(RET_MISSING*VC),dtype=np.float32)
         for g,rk in local.items():
-            mask=PLANE_MASK[g].ravel();via_extra[mask]=np.minimum(via_extra[mask],rk['via_extra'][mask])
+            mask=masks[g].ravel();via_extra[mask]=np.minimum(via_extra[mask],rk['via_extra'][mask])
         return dict(local=local,via_extra=via_extra,R=R)
     net_list = sorted(set(RV_NET.values()))
     if len(net_list) != 1: return None
@@ -5806,6 +5889,8 @@ def _rv_map_net(g, box, VC, R):
             if g in nn:
                 area=PLANE_LAYER.get((g,L),Polygon()).buffer(-VIA_R-.01)
                 f &= shapely.contains_xy(area,xx,yy)
+    elif RV_DOM:
+        f &= RV_DOM_INNER[g][ys, xs]
     vacant[ys, xs] = f
     via_extra = np.full(NN, np.float32(RET_MISSING * VC), dtype=np.float32); V = via_extra.reshape(NY, NX)
     if f.any(): V[ys, xs] = np.where(_edt(~f) * RES <= R, np.float32(RET_PRESENT * VC), V[ys, xs])
@@ -5842,6 +5927,7 @@ def rv_demand(net, v, trs):
     for i, a in enumerate(gen):
         for b in gen[i + 1:]:
             if RV_PAIR[a * NL + b] > 0:
+                if RV_DOM: return _rv_region(v['x'], v['y'])
                 if PLANE_LAYER:
                     refs=[STRUCTURE[i]['ref'] for i in (a,b)]
                     mass=[L for L in refs if set(FL_ASSIGNMENT.get(L,[])) & GNDS]
@@ -5883,8 +5969,6 @@ def rv_set(net, trs, vs, RK, owned=None):
             if ok: break
         RV_STAT['assigned' if ok else 'no_slot'] += 1
     return new
-
-
 def rv_post_run():
     if RET <= 0: return 0, 0
     new_n = way_n = 0; _CAND_IDX[0] = None
@@ -5898,16 +5982,16 @@ def rv_post_run():
         legacy_g = demand[0][1] if demand else rv[0]['net']
         foreign_nets={}
         for g in sorted({g for _,g in demand}|{v['net'] for v in rv}):
-            source_g=g if PLANE_LAYER else legacy_g
+            source_g=g if RV_LOCAL else legacy_g
             foreign_nets[g]=[(v['x'],v['y']) for w,r2 in U.items() if w!=u for v in r2['vias'] if (v.get('net') or r2['net'])==source_g]
             foreign_nets[g]+=[(D['pads'][k]['x'],D['pads'][k]['y']) for k in by_net_g.get(source_g,()) if D['pads'][k].get('drill')]
         keep = []
         for w in rv:
-            required = any((not PLANE_LAYER or w['net']==g) and math.hypot(v['x'] - w['x'], v['y'] - w['y']) <= R and not any(math.hypot(v['x'] - a, v['y'] - b) <= R for a, b in foreign_nets[g])
+            required = any((not RV_LOCAL or w['net']==g) and math.hypot(v['x'] - w['x'], v['y'] - w['y']) <= R and not any(math.hypot(v['x'] - a, v['y'] - b) <= R for a, b in foreign_nets[g])
                          for v, g in demand)
             if required: keep.append(w)
             else: way_n += 1
-        open_items = [v for v,g in demand if not any(math.hypot(v['x'] - a, v['y'] - b) <= R for a,b in foreign_nets[g]+[(w['x'],w['y']) for w in keep if not PLANE_LAYER or w['net']==g])]
+        open_items = [v for v,g in demand if not any(math.hypot(v['x'] - a, v['y'] - b) <= R for a,b in foreign_nets[g]+[(w['x'],w['y']) for w in keep if not RV_LOCAL or w['net']==g])]
         if len(keep) != len(rv):
             del_unit(u); add_unit(u, net, r['tracks'], sv + keep); r = U[u]; cand_idx_changed(u)
         if open_items:
@@ -6236,6 +6320,18 @@ KF_AFTER = {}
 KF_BEFORE = {}
 _METRIC_OFF = set()
 CHAIN_STAT = dict(element=0, without_zone=0, back=0, detour=0, rest_free=0)
+
+
+
+
+ZGROUPS = {}
+if args.get('zone_groups') not in (None, '', '0'):
+    for _zn, _zgs in sorted(json.load(open(args['zone_groups'])).items()):
+        for _zk, _zg in enumerate(_zgs):
+            for _zp in _zg: ZGROUPS[(_zn, _zp)] = _zk
+    print('Zone groups (E126): %d pads in %d groups' % (len(ZGROUPS), len({(n, k) for (n, _), k in ZGROUPS.items()})), flush=True)
+ZG_STAT = dict(vacant=0, later=0)
+ROOT_STAT = dict(swapped=0)
 CHAIN_REST = CHAIN and args.get('chain_rest', '1') == '1'
 CHAIN_REST_ANT = float(args.get('chain_rest_share', '0.2')); CHAIN_REST_MM = float(args.get('chain_rest_mm', '5.0'))
 
@@ -6321,8 +6417,8 @@ def _chains_build():
     if CHAINS: print('Supply chains (R22): %d chains in %d nets, of which %d nets with area' % (
         sum(len(v) for v in CHAINS.values()), len(CHAINS), sum(1 for n in CHAINS if n in AREA_NETS)), flush=True)
 
-if CHAIN: _chains_build()
 
+if CHAIN: _chains_build()
 def _rectangle_cells(bx, r):
     ixa = max(0, int((bx[0] - r - X0) / RES)); ixb = min(NX, int((bx[2] + r - X0) / RES) + 1)
     iya = max(0, int((bx[1] - r - Y0) / RES)); iyb = min(NY, int((bx[3] + r - Y0) / RES) + 1)
@@ -6331,6 +6427,7 @@ def _rectangle_cells(bx, r):
     m = (np.maximum(bx[0] - GX, GX - bx[2]) <= r) & (np.maximum(bx[1] - GY, GY - bx[3]) <= r)
     yy, xx = np.nonzero(m)
     return (yy + iya) * NX + (xx + ixa)
+
 
 def _metric(inner, traces, vias, vacant, wmin, dist=None):
     if dist is None: dist = CHAIN_DIST
@@ -6383,8 +6480,6 @@ def _metric_prepare(r, net):
     ys = [q[1] for t in r['tracks'] if t.get('link_chain') for q in t['pts']] + [D['pads'][k]['bbox'][i] for k in inner for i in (1, 3)]
     box = (min(xs) - 2.5, min(ys) - 2.5, max(xs) + 2.5, max(ys) + 2.5) if xs else (0.0, 0.0, 0.0, 0.0)
     return dict(G=G, box=box)
-
-
 def _metric_width(metric, r, width_list, ti, a, b, li):
     g = r['tracks'][ti].get('link_chain') or 0; bx = metric['box']
     if g == 0 and (max(a[0], b[0]) < bx[0] or min(a[0], b[0]) > bx[2] or max(a[1], b[1]) < bx[1] or min(a[1], b[1]) > bx[3]): return 9.0
@@ -6832,6 +6927,7 @@ def _route_unit_impl(u):
             _gl += [(b_, (K_, s_ + 1, [a_])) for s_, (a_, b_) in enumerate(zip(K_['caps'][:-1], K_['caps'][1:]))]
         jobs = _gl + jobs; tree_cons = list(tree)
     _hint0 = ASTAR_HINT[0]
+    _zg_later = set(); _root_way = set()
     for j, gl in jobs:
         if globals().get('_LOOP_DEADLINE') is not None: _loop_cpu_check()
         if VIA_DENSITY and all_v:
@@ -6913,6 +7009,10 @@ def _route_unit_impl(u):
                 tree.append(j); continue
             if not BGA_PLAN:
                 all_tr += BF[j][1]; all_v += BF[j][2]; tree.append(j); continue
+        if ZGROUPS and gl is None and not is_tap:
+            _zgj = ZGROUPS.get((net, '%s:%s' % (p['ref'], p['num'])))
+            if _zgj is not None and any(ZGROUPS.get((net, '%s:%s' % (pads[i]['ref'], pads[i]['num']))) == _zgj for i in tree):
+                ZG_STAT['vacant'] += 1; tree.append(j); continue
         if gl is None and not is_tap and j not in kel:
             tcells = set()
             for i in tree:
@@ -6998,8 +7098,6 @@ def _route_unit_impl(u):
             if res and _mz and CHAIN_REST and gl is None and not is_tap and KT is not None and (_zone is _kzz or _zone is _kzr):
 
 
-
-
                 _lb = _clearance_min(src_s, tgt)
                 res_f = astar_pf(src_s, tgt, bx, capH, capS, viaH, viaBad, Cb, win, extra=_ex) if _plen(res) > _lb + max(CHAIN_REST_ANT * _lb, CHAIN_REST_MM) else None
                 if res_f and _plen(res) > _plen(res_f) + max(CHAIN_REST_ANT * _plen(res_f), CHAIN_REST_MM):
@@ -7027,6 +7125,14 @@ def _route_unit_impl(u):
             K_['stop'] = True
             _free = [i for i in K_['pins'] + K_['caps'][:-1] if i not in K_['pin_ok'] and i not in K_['caps'][:max(K_['end'], 0)]]
             jobs.extend((i, None) for i in _free); continue
+        if not res and _hard and gl is None and not is_tap and not SP and KT is None and tree == [first] and not all_tr and not all_v \
+                and len(_root_way) < 6 and j not in _root_way:
+
+
+
+            _root_way.update((first, j)); jobs.append((first, None)); first = j; tree[:] = [j]; ROOT_STAT['swapped'] += 1; continue
+        if not res and ZGROUPS and gl is None and not is_tap and j not in _zg_later and ZGROUPS.get((net, '%s:%s' % (p['ref'], p['num']))) is not None:
+            _zg_later.add(j); ZG_STAT['later'] += 1; jobs.append((j, None)); continue
         if not res:
             if _hard:
                 _pk = '%s:%s' % (p['ref'], p['num'])
@@ -7144,12 +7250,18 @@ def unit_conflicts(u, capS, dd):
             bad.extend([li * NN + iy * NX + ix for li in range(NL)])
     return bad
 
-
 from shapely.geometry import LineString as _LS, Point as _PT
 from shapely.strtree import STRtree as _STR
 DRC_CLR = DRCC + 0.004
 DRC_HOLE = H2H + VIA_DR + 0.004
 DRC_PADC = DRCP + (PAD_EXTRA if BGA_TIGHT else 0.004)
+
+
+VIA_SHARE = NC is not None and args.get('via_share', '1') == '1'
+
+
+def _via_shared(n1, x1, y1, n2, x2, y2):
+    return VIA_SHARE and n1 == n2 and abs(x1 - x2) < 1e-6 and abs(y1 - y2) < 1e-6
 
 
 def _pz_clearance(net,other,pad=False):
@@ -7166,7 +7278,6 @@ if globals().get('KA') is not None: _DMAX = max(_DMAX,KA.maximum+.012)
 _PADB = {li: [(pn, pg, pg.buffer(_DMAX)) for pn, pg in _PADG[li]] for li in range(NL)}
 if DRCL:
 
-
     _PADB = {li: [] for li in range(NL)}
     for _p in D['pads']:
         _pn = _p['net'] if _p['net'] and not _p['net'].startswith('unconnected') else '#%d' % id(_p)
@@ -7176,6 +7287,24 @@ if DRCL:
                   if globals().get('KA') is not None else pad_hull(_p, _L, DRCP, True))
             if globals().get('KA') is not None: _KA_META[id(_g)] = _ka_pad_kind(_p)
             _PADB[LI[_L]].append((_pn, _g, _g.buffer(_DMAX)))
+elif HOLE_CLR > DRCP and globals().get('KA') is None and args.get('hole_exact', '1') == '1':
+
+    for _p in D['pads']:
+        if not _p.get('drill'): continue
+        _pn = _p['net'] if _p['net'] and not _p['net'].startswith('unconnected') else '#%d' % id(_p)
+        _h = (shapely.union_all([Polygon(q) for q in _p['hole_polys']]) if NC is not None and _p.get('hole_polys')
+              else _PT(_p['x'], _p['y']).buffer(_p['drill'] / 2, 32)).buffer(HOLE_CLR - DRCP, 32)
+        for _L in _p['layers']:
+            if _L in LI: _PADB[LI[_L]].append((_pn, _h, _h.buffer(_DMAX)))
+if not DRCL and globals().get('KA') is None:
+
+    for _p in D['pads']:
+        if _p.get('clearance', 0.0) <= DRCP + 1e-6: continue
+        _pn = _p['net'] if _p['net'] and not _p['net'].startswith('unconnected') else '#%d' % id(_p)
+        for _L in _p['layers']:
+            if _L not in LI: continue
+            _h = shapely.union_all([Polygon(q) for q in _p['polys'][_L]]).buffer(_p['clearance'] - DRCP, 32)
+            _PADB[LI[_L]].append((_pn, _h, _h.buffer(_DMAX)))
 if globals().get('KA') is not None:
     for _li,_keeps in _KA_PAD_KEEP.items():
         _PADB[_li].extend((_pn,_g,_g.buffer(_DMAX)) for _pn,_g,_kind in _keeps)
@@ -7203,21 +7332,33 @@ def _unit_geo(u, r):
 
 
 FIX_PAIRS = []
+_R44_CAPTURE = None
+
+
+def _r44_witness(u, g=None, area=None, xy=None):
+    ctx = globals().get('_R44_CAPTURE')
+    if ctx is None or u == 'PAD': return
+    if xy is not None:
+        keys = ctx['vias'].get((u, *xy), [])
+        region = _PT(*xy)
+    else:
+        key = ctx['geo'].get(id(g))
+        keys = [key] if key is not None else []
+        region = g if area is None else g.intersection(area)
+    if not region.is_empty:
+        for key in keys: ctx['bad'].setdefault(u, []).append((key, region.wkb_hex))
 
 
 def _fixed_pair(a, b):
 
 
     return a.startswith('FIX#') and b.startswith('FIX#') and (globals().get('args') or {}).get('rest_checking') != '1'
-
-
 def _conflict_points(a, b, spacing):
     if spacing == 0:
         c = shapely.point_on_surface(shapely.intersection(a, b))
         return c, c
     line = shapely.shortest_line(a, b)
     return shapely.get_point(line, 0), shapely.get_point(line, -1)
-
 
 def _pad_drill_conflicts(vias, rating, report=True):
     if not PAD_HOLE_GEOMS or not vias: return
@@ -7233,31 +7374,76 @@ def _pad_drill_conflicts(vias, rating, report=True):
     for i,j,d in zip(a.tolist(),b.tolist(),distance.tolist()):
         if d >= H2H-1e-9: continue
         u,_,x,y=vias[i]
+        if globals().get('_R44_CAPTURE') is not None: _r44_witness(u,xy=(x,y))
         for li in range(NL): rating(u,x,y,li)
         if report:
             PAIRS.append(('*',round(d,4),u,'PAD',round(x,2),round(y,2)))
             if VIA_PRECEDENCE: PAIRS_RAW.append((-1,x,y,u,'PAD'))
 
 
-def _in_window(bounds, F):
+def _in_window_bb(bounds, F):
+
+
     return bounds[0] <= F[2] and bounds[2] >= F[0] and bounds[1] <= F[3] and bounds[3] >= F[1]
+
+
+
+
+
+EDGE_CONFLICT = NC is not None and args.get('edge_conflict', '1') == '1'
+_EDGE = [None]
+
+
+def _edge_conflicts(geoms, rating, pairs=True):
+    if _EDGE[0] is None:
+        _b = border_polygon(D); _EDGE[0] = (_b, _b.boundary)
+    board, border = _EDGE[0]; lim = float(args.get('edge', '0.30')) - 1e-6
+    for li in range(NL):
+        G = [e for e in geoms[li] if e[0] != 'PAD']
+        if not G: continue
+        ga = np.array([g for _, _, g, _ in G], dtype=object)
+        d = shapely.distance(ga, border)
+        off = ~shapely.covers(board, ga)
+        for i in np.nonzero((d < lim) | off)[0].tolist():
+            u, _, g, _ = G[i]
+            if globals().get('_R44_CAPTURE') is not None: _r44_witness(u,g,area=g.difference(board.buffer(-max(0,lim))))
+            c = shapely.get_point(shapely.shortest_line(g, border), 0)
+            rating(u, c.x, c.y, li)
+            if pairs: PAIRS.append((LAYERS[li], round(float(d[i]), 3), u, 'PAD', round(c.x, 2), round(c.y, 2)))
+
+
+
+
+
+EDGE_WIDE = EDGE_CONFLICT and args.get('edge_wide', '1') == '1'
+
+
+def _edge_width(a, b, w):
+    if not EDGE_WIDE: return w
+    if _EDGE[0] is None:
+        _b = border_polygon(D); _EDGE[0] = (_b, _b.boundary)
+    seg = _LS([a, b]) if a != b else _PT(a)
+    if not _EDGE[0][0].covers(seg): return w
+    return min(w, 2 * (float(seg.distance(_EDGE[0][1])) - float(args.get('edge', '0.30')) - 1e-6))
+
+
 def exact_conflicts(without=None, window=None):
     PAIRS.clear(); PAIRS_RAW.clear(); FIX_PAIRS.clear()
     geoms = {li: [] for li in range(NL)}
-    drills_l = []
+    drills_l = []; drills_vn = []
     for u, r in U.items():
         if without is not None and u in without: continue
         for li, k, kb, ne in _unit_geo(u, r):
-            if window is None or _in_window(k.bounds, window): geoms[li].append((u, ne, k, kb))
+            if window is None or _in_window_bb(k.bounds, window): geoms[li].append((u, ne, k, kb))
         for v in r['vias']:
 
 
-            if window is not None and not _in_window((v['x'], v['y'], v['x'], v['y']), window): continue
+            if window is not None and not _in_window_bb((v['x'], v['y'], v['x'], v['y']), window): continue
             nv = (v.get('net') or r['net']) if BGA_HOLE or bool(globals().get('PZ_LOCAL')) else r['net']
-            drills_l.append((u, nv, v['x'], v['y']))
+            drills_l.append((u, nv, v['x'], v['y'])); drills_vn.append(v.get('net') or r['net'])
     for li in range(NL):
         for pn, pg, pb in _PADB[li]:
-            if window is None or _in_window(pg.bounds, window): geoms[li].append(('PAD', pn, pg, pb))
+            if window is None or _in_window_bb(pg.bounds, window): geoms[li].append(('PAD', pn, pg, pb))
     conf = {}
     def rating(u, x, y, li):
         if u == 'PAD': return
@@ -7284,9 +7470,10 @@ def exact_conflicts(without=None, window=None):
             for i, j, dij in zip(hi[hm].tolist(), hj[hm].tolist(), hd[hm].tolist()):
                 u, _, x, y = drills_l[i]; u2 = G[j][0]
                 if _fixed_pair(u, u2): continue
+                if globals().get('_R44_CAPTURE') is not None:
+                    _r44_witness(u,xy=(x,y))
+                    _r44_witness(u2,ga[j],area=hp[i].buffer(VIA_DR/2+HOLE_CLR+1e-6))
                 c2 = shapely.get_point(shapely.shortest_line(hp[i], ga[j]), -1)
-
-
 
                 rating(u, x, y, li); rating(u2, c2.x, c2.y, li)
                 cx, cy = (x+c2.x)/2, (y+c2.y)/2
@@ -7311,6 +7498,12 @@ def exact_conflicts(without=None, window=None):
             u, net, g, _ = G[i]; u2, net2, g2, _ = G[j]
             if _fixed_pair(u, u2):
                 FIX_PAIRS.append((LAYERS[li], round(dij, 4), u, u2)); continue
+            if globals().get('_R44_CAPTURE') is not None:
+                lim = (_ka_geo_limit(net,net2,li,g,g2,bool(pad[j])) if globals().get('KA') is not None else
+                       _pz_clearance(net,net2,bool(pad[i] or pad[j])) if globals().get('PZ_LOCAL') else
+                       DRC_PADC if pad[i] or pad[j] else DRC_CLR)
+                _r44_witness(u,g,area=g2.buffer(lim+1e-6))
+                _r44_witness(u2,g2,area=g.buffer(lim+1e-6))
             if BGA_PLAN or CONFLICT_SITE_EXACT or globals().get('_REST_LOCAL_CONFLICT', False):
 
 
@@ -7322,6 +7515,7 @@ def exact_conflicts(without=None, window=None):
                 rating(u, c.x, c.y, li); rating(u2, c.x, c.y, li)
             PAIRS.append((LAYERS[li], round(dij, 3), u, u2, round(c.x, 2), round(c.y, 2)))
             if VIA_PRECEDENCE: PAIRS_RAW.append((li, c.x, c.y, u, u2))
+    if globals().get('EDGE_CONFLICT'): _edge_conflicts(geoms, rating)
     _pad_drill_conflicts(drills_l,rating)
     if len(drills_l) > 1:
         from scipy.spatial import cKDTree
@@ -7329,9 +7523,12 @@ def exact_conflicts(without=None, window=None):
         _vhclear = max(DRC_HOLE, VIA_DR / 2 + VIA_R + HOLE_CLR) if BGA_HOLE or bool(globals().get('PZ_LOCAL')) else DRC_HOLE
         for i, j in sorted(cKDTree(P).query_pairs(_vhclear * (1 + 1e-9) + 1e-9)):
             u, n1, x1, y1 = drills_l[i]; u2, n2, x2, y2 = drills_l[j]
+            if _via_shared(drills_vn[i], x1, y1, drills_vn[j], x2, y2): continue
             if math.hypot(x1 - x2, y1 - y2) < DRC_HOLE or ((BGA_HOLE or bool(globals().get('PZ_LOCAL'))) and n1 != n2 and math.hypot(x1 - x2, y1 - y2) < VIA_DR / 2 + VIA_R + HOLE_CLR - 0.000001):
                 if _fixed_pair(u, u2):
                     FIX_PAIRS.append(('*', round(math.hypot(x1 - x2, y1 - y2), 4), u, u2)); continue
+                if globals().get('_R44_CAPTURE') is not None:
+                    _r44_witness(u,xy=(x1,y1)); _r44_witness(u2,xy=(x2,y2))
                 for li in range(NL): rating(u, x1, y1, li); rating(u2, x2, y2, li)
                 if VIA_PRECEDENCE: PAIRS_RAW.append((-1, x1, y1, u, 'PAD')); PAIRS_RAW.append((-1, x2, y2, u2, 'PAD'))
 
@@ -7356,6 +7553,8 @@ def _narrow_raw():
                 permitted = WF is not None and not t.get('sig') and 0 <= ix < NX and 0 <= iy < NY and float(WF[li * NN + iy * NX + ix]) < nominal
                 out.append((u, r['net'], li, a, b, w, nominal, bool(permitted)))
     return out
+
+
 def under_wmin():
     out = []; before = None
     for u, net, li, a, b, w, nominal, permitted in _narrow_raw():
@@ -7413,7 +7612,6 @@ def tight_conflicts():
             for u2 in opponent or ['PAD']: PAIRS.append((LAYERS[li], round(w - nominal, 3), u, u2, round(mx, 2), round(my, 2)))
     return conf
 
-
 _CAND_IDX = [None]
 
 
@@ -7441,11 +7639,26 @@ def cand_idx_back(u):
     if X is not None and u in X['missing']: cand_idx_changed(u)
 
 
-def unit_conflict_free(u):
+UNIT_CHK = args.get('unit_chk', '0') == '1'
+
+
+def unit_conflict_free(u, _chk=True):
+    if _chk and globals().get('UNIT_CHK'):
+        ok = unit_conflict_free(u, False); entire = exact_conflicts()
+        if not (set(entire) - {u}) and ok != (u not in entire):
+            raise AssertionError('unit_conflict_free(%s) = %s, full check: %s' % (u, ok, PAIRS[:4]))
+        return ok
     if BGA_HOLE or globals().get('PZ_LOCAL') or globals().get('KA') is not None: return u not in exact_conflicts()
     X = _CAND_IDX[0]
     if X is None or len(X['prior']) > 48: X = _CAND_IDX[0] = _cand_idx_build(u)
     r = U[u]; net = r['net']; geo = _unit_geo(u, r)
+    if globals().get('EDGE_CONFLICT'):
+
+
+        if _EDGE[0] is None:
+            _b = border_polygon(D); _EDGE[0] = (_b, _b.boundary)
+        _bd, _rd = _EDGE[0]; _lim = float(args.get('edge', '0.30')) - 1e-6
+        if any(k.distance(_rd) < _lim or not _bd.covers(k) for _, k, _, _ in geo): return False
     for li in range(NL):
         mine = [(k, kb, ne) for l2, k, kb, ne in geo if l2 == li]
         if not mine: continue
@@ -7471,27 +7684,28 @@ def unit_conflict_free(u):
         _pad_drill_conflicts([(u, net, v['x'], v['y']) for v in r['vias']],
                           lambda *q: pad_conflict.append(q), report=False)
         if pad_conflict: return False
-        all_items = [(v['x'], v['y'], u2) for u2, r2 in U.items() for v in r2['vias']]
+        all_items = [(v['x'], v['y'], u2, v.get('net') or r2['net']) for u2, r2 in U.items() for v in r2['vias']]
         for i, v in enumerate(r['vias']):
-            for x, y, u2 in all_items:
+            for x, y, u2, n2 in all_items:
                 if (u2 == u and x == v['x'] and y == v['y']) or _fixed_pair(u, u2): continue
+                if _via_shared(v.get('net') or net, v['x'], v['y'], n2, x, y): continue
                 if math.hypot(v['x'] - x, v['y'] - y) < DRC_HOLE: return False
     return True
 
 
 def groups_index(group):
-    g = set(group); per = {li: [] for li in range(NL)}; bore = []
+    g = set(group); per = {li: [] for li in range(NL)}; bore = []; bore_net = []
     for u, r in U.items():
         if u in g: continue
         for li, k, kb, ne in _unit_geo(u, r): per[li].append((u, ne, k))
-        for v in r['vias']: bore.append((v['x'], v['y'], u))
+        for v in r['vias']: bore.append((v['x'], v['y'], u)); bore_net.append(v.get('net') or r['net'])
     cu_layers = {}
     for li in range(NL):
         for pn, pg, pb in _PADB[li]: per[li].append(('PAD', pn, pg))
         if per[li]:
             ga = np.array([q for _, _, q in per[li]], dtype=object)
             cu_layers[li] = (_STR(ga), [o for o, _, _ in per[li]], [n for _, n, _ in per[li]], ga)
-    return dict(cu_layers=cu_layers, bore=bore, bxy=np.array([(x, y) for x, y, _ in bore], dtype=np.float64).reshape(-1, 2))
+    return dict(cu_layers=cu_layers, bore=bore, bore_net=bore_net, bxy=np.array([(x, y) for x, y, _ in bore], dtype=np.float64).reshape(-1, 2))
 
 
 def conflicts_group(group, X, without=None):
@@ -7543,16 +7757,21 @@ def conflicts_group(group, X, without=None):
                 else:
                     c = k.centroid if d == 0 else k.boundary.interpolate(k.boundary.project(mine[j][2].centroid))
                     rating(mine[i][0], c.x, c.y, li); rating(mine[j][0], c.x, c.y, li)
+    if globals().get('EDGE_CONFLICT'):
+        _edge_conflicts({li: [(u, ne, k, kb) for u in with_ for l2, k, kb, ne in _unit_geo(u, U[u]) if l2 == li] for li in range(NL)},
+                         rating, pairs=False)
     own_set = [(v['x'], v['y'], u) for u in with_ for v in U[u]['vias']]
+    mine_net = [v.get('net') or U[u]['net'] for u in with_ for v in U[u]['vias']]
     _pad_drill_conflicts([(u,None,x,y) for x,y,u in own_set],rating,report=False)
     for i, (x, y, u) in enumerate(own_set):
         if len(X['bxy']):
             for j in np.flatnonzero(np.hypot(X['bxy'][:, 0] - x, X['bxy'][:, 1] - y) < DRC_HOLE).tolist():
                 if _fixed_pair(u, X['bore'][j][2]) or (without is not None and X['bore'][j][2] in without): continue
+                if _via_shared(mine_net[i], x, y, X['bore_net'][j], X['bore'][j][0], X['bore'][j][1]): continue
                 for li in range(NL): rating(u, x, y, li); rating(X['bore'][j][2], X['bore'][j][0], X['bore'][j][1], li)
-        for x2, y2, u2 in own_set[i + 1:]:
+        for i2, (x2, y2, u2) in enumerate(own_set[i + 1:], i + 1):
             if math.hypot(x - x2, y - y2) < DRC_HOLE:
-                if _fixed_pair(u, u2): continue
+                if _fixed_pair(u, u2) or _via_shared(mine_net[i], x, y, mine_net[i2], x2, y2): continue
                 for li in range(NL): rating(u, x, y, li); rating(u2, x2, y2, li)
     return conf
 
@@ -7664,6 +7883,7 @@ def _widen_unit_prev(u, C):
                 for _lj, _s in neighbor_spacing(li, _sp):
                     wv = min(wv, 2 * (line_cap_min(_dk[_lj], a, b) - _s))
             if 'w_step' in C: wv = min(wv, w0 + C['w_step'])
+            wv = _edge_width(a, b, wv)
             if uniform:
                 ws.append(_r32_clearance(rx, u, li, a, b, net, min(C['w'], wv)))
             else: ws.append(max(w0, math.floor(wv * 40) / 40))
@@ -7676,6 +7896,7 @@ def _widen_unit_prev(u, C):
 
 
             minimum = TRACK_MIN if TRACK_MIN > 0 else C['wmin']
+            if 'dru_min' in C: minimum = max(minimum, C['dru_min'])
             target = max(minimum, C['w']) if min(widths) >= max(minimum, C['w']) - 1e-9 else minimum
             new_tr = [dict(t, w=[target] * len(t['w'])) for t in new_tr]
     add_unit(u, net, new_tr, r['vias'])
@@ -7710,6 +7931,8 @@ def _wide_dense_cap(X, u, li, a, b, net, limit):
                 if (v.get('net') or r['net']) != net:
                     limit = min(limit, 2 * (seg.distance(_PT(v['x'], v['y'])) - VIA_DR / 2 - HOLE_CLR - 1e-7))
     return limit
+
+
 def widen_unit(u, C):
     if not WIDE_DENSE:
         return _widen_unit_prev(u, C)
@@ -7773,19 +7996,113 @@ def width_calm(u, C):
     if n: del_unit(u); add_unit(u, r['net'], new_tr, r['vias'])
     else: U[u] = U.pop(u)
     return before, post, n
+SKEW_KAPPE = 199
+
+
+def _skew_dome_shapes(extra, L, w, clearance, options):
+    from common import meander as M
+    if options.get('skew_shapes', '0') != 'entire':
+        return M.crests_shapes(extra, L, w, clearance)
+    legacy = M.crests_shapes(extra, L, w, clearance)
+
+
+    minimum = max(2*w, w+clearance)
+    spacings = sorted(set(M.STANDARD['s_values']) | {
+        round(minimum+.02*k, 8) for k in range(4)
+        if minimum+.02*k < min(M.STANDARD['s_values'])-1e-9})
+    out = []
+    for small, rmin in ((0, M.STANDARD['rmin']), (1, M.STANDARD['rmin_emergency'])):
+        for n in range(1, M.STANDARD['n_max'] + 1):
+            for s in spacings:
+                if s < max(2*w, w+clearance)-1e-9: continue
+                radii = [s*rf for rf in M.STANDARD['r_shares']]
+                if rmin <= s/2+1e-9: radii.append(rmin)
+                for radius in sorted(set(radii), reverse=True):
+                    shape = M.shaping(extra, n, s, radius, rmin, M.STANDARD['amax'])
+                    if shape is None: continue
+                    r, A = shape; F = M.meander_local(n, s, r, A)[1]
+                    if F > L-2*M.MICRO: continue
+                    key = (small, n, round(abs(r/s-.5), 4), round(abs(s-.6), 4), A, s, r, F)
+                    if key not in out: out.append(key)
+    out.sort()
+    result = list(legacy)
+    for _,n,_,_,A,s,r,F in out:
+        shape = (n,s,r,A,F)
+        if shape not in result: result.append(shape)
+    return result
+
+
+def _skew_items_preview(items, chord=0.0002):
+    from common.meander import arc_points
+    pts = [list(items[0][1])]; ws = []
+    for it in items:
+        if it[0] == 'L': pts.append(list(it[2])); ws.append(it[3])
+        else:
+            for x, y in arc_points(it[1], it[2], it[3], chord)[1:]: pts.append([round(x, 6), round(y, 6)]); ws.append(it[4])
+    pts[-1] = list(items[-1][2] if items[-1][0] == 'L' else items[-1][3])
+    return pts, ws
+
+
+def _skew_round_pockets(a, b, target, w):
+    from common.meander import MICRO
+    a,b=tuple(a),tuple(b);dx,dy=abs(b[0]-a[0]),abs(b[1]-a[1])
+    if min(dx,dy)<1e-6:return []
+    sx=1 if b[0]>a[0] else -1;sy=1 if b[1]>a[1] else -1
+    out=[]
+    for swap in (False,True):
+        X,Y=(dy,dx) if swap else (dx,dy)
+        for radius in (.15,.10,.07,.05):
+            sharp=target+3*(2-math.pi/2)*radius
+            for side in (1,-1):
+                outside=(sharp+X-Y)/2 if side==1 else (X+Y-sharp)/2
+                if not (outside>X+1e-6 if side==1 else outside<-1e-6):continue
+                for fraction in (.25,.5,.75):
+                    mid=Y*fraction
+                    chain=[(0.,0.),(outside,0.),(outside,mid),(X,mid),(X,Y)]
+                    lengths=[math.dist(p,q) for p,q in zip(chain,chain[1:])]
+                    free=[lengths[0]-radius,lengths[1]-2*radius,lengths[2]-2*radius,lengths[3]-radius]
+                    if min(free)<MICRO-1e-9:continue
+                    def world(p):
+                        x,y=(p[1],p[0]) if swap else p
+                        return [round(a[0]+sx*x,6),round(a[1]+sy*y,6)]
+                    items=[];load=chain[0]
+                    for i in range(1,4):
+                        p,c,q=chain[i-1:i+2]
+                        u=((c[0]-p[0])/lengths[i-1],(c[1]-p[1])/lengths[i-1])
+                        v=((q[0]-c[0])/lengths[i],(q[1]-c[1])/lengths[i])
+                        start=(c[0]-radius*u[0],c[1]-radius*u[1])
+                        end=(c[0]+radius*v[0],c[1]+radius*v[1])
+                        center=(start[0]+radius*v[0],start[1]+radius*v[1])
+                        midpoint=(center[0]+radius*(u[0]-v[0])/math.sqrt(2),center[1]+radius*(u[1]-v[1])/math.sqrt(2))
+                        items.append(['L',world(load),world(start),w])
+                        items.append(['A',world(start),world(midpoint),world(end),w]);load=end
+                    items.append(['L',world(load),world(chain[-1]),w])
+                    items[0][1]=list(a);items[-1][2]=list(b)
+                    points,widths=_skew_items_preview(items)
+                    out.append((points,items,radius,swap,side,fraction))
+    return out
+
+
+def skew_allowed(old, new, net):
+    import collections, re
+    def kinds(d): return collections.Counter(v['type'] for v in d['violations'] if v['severity'] == 'error')
+    entire = {t for d in (old, new) for t, c in kinds(d).items() if c >= SKEW_KAPPE}
+    mark = '[%s]' % net
+    def signature(d):
+        return collections.Counter((v['type'], v['description'], json.dumps([(i['description'], i['pos']) for i in v['items']], sort_keys=True))
+            for v in d['violations'] if v['severity'] == 'error' and v['type'] != 'skew_out_of_range'
+            and (v['type'] not in entire or any(mark in i['description'] for i in v['items'])))
+    def opens(d):
+        return collections.Counter(re.search(r'\[([^]]+)\]', v['items'][0]['description'])[1] for v in d['unconnected_items'])
+    return not (signature(new) - signature(old)) and not (opens(new) - opens(old))
+
+
 def skew_match(board, routes, options, target_folder):
     import collections, hashlib, re
     from shapely.geometry import LineString, Point, Polygon
     from shapely.ops import unary_union
     folder = Path(target_folder); folder.mkdir(parents=True, exist_ok=True)
     def sha(v): return hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest()
-    def signature(d):
-        return collections.Counter((v['type'],v['description'],json.dumps([(i['description'],i['pos']) for i in v['items']],sort_keys=True))
-            for v in d['violations'] if v['severity']=='error' and v['type']!='skew_out_of_range')
-    def opens(d):
-        return collections.Counter(re.search(r'\[([^]]+)\]',v['items'][0]['description'])[1] for v in d['unconnected_items'])
-    def allowed(old,new):
-        return not(signature(new)-signature(old)) and not(opens(new)-opens(old))
     current = copy.deepcopy(routes)
     drc = native_route_verify(board,current,options,folder/'begin')
     native_folder=folder/'begin'
@@ -7817,8 +8134,32 @@ def skew_match(board, routes, options, target_folder):
                 for L,polys in p.get('polys',{}).items():
                     (foreign if p['net']!=net else own).setdefault(L,[]).extend(Polygon(q) for q in polys)
             obstacles={L:unary_union(gg) for L,gg in foreign.items()}
+            candidates=[]
 
 
+            if options.get('skew_shapes','0')=='entire':
+                for ti,t in enumerate(current['tracks']):
+                    if t['net']!=net or t.get('items') or not t['w'] or max(t['w'])-min(t['w'])>1e-7:continue
+                    w=t['w'][0];layer=t['layer'];i=0;j=len(t['pts'])-1
+                    oldlen=sum(math.dist(p,q) for p,q in zip(t['pts'],t['pts'][1:]))
+                    ends=[Point(t['pts'][0]),Point(t['pts'][-1])]
+                    own_shapes=[g for g in own.get(layer,[]) if all(g.distance(p)>w for p in ends)]
+                    for tj,tt in enumerate(current['tracks']):
+                        if tj!=ti and tt['net']==net and tt['layer']==layer:
+                            own_shapes.extend(LineString([pa,pb]).buffer(ww/2) for pa,pb,ww in zip(tt['pts'][:-1],tt['pts'][1:],tt['w']))
+                    pockets_owned=unary_union(own_shapes)
+                    for fraction in (1.,.5,.25):
+                        added=delta*fraction
+                        for points,sp_items,radius,swap,side,pos in _skew_round_pockets(t['pts'][0],t['pts'][-1],oldlen+added,w):
+                            line=LineString(points);copper=line.buffer(w/2)
+                            if not line.is_simple or not boundary.covers(copper):continue
+                            obs=obstacles.get(layer)
+                            if obs is not None and copper.distance(obs)<clearance:continue
+                            pocket=LineString(points[1:-1]).buffer(w/2)
+                            if not pockets_owned.is_empty and pocket.distance(pockets_owned)<max(clearance,w):continue
+                            coupling=min((line.distance(g) for g in partners.get(layer,[])),default=1e3)
+                            rank=(-added,0,1000-radius,coupling,j-i,ti,i,j,side,pos,'pocket',tuple(map(tuple,points)),0)
+                            candidates.append((rank,ti,i,j,points,added,w,layer,'pocket',sp_items))
             spans=[]
             for ti,t in enumerate(current['tracks']):
                 if t['net']!=net or t.get('items'):continue
@@ -7831,7 +8172,6 @@ def skew_match(board, routes, options, target_folder):
                         if L<.25:continue
                         dx,dy=abs(a[0]-b[0]),abs(a[1]-b[1])
                         oldlen=sum(math.dist(x,y) for x,y in zip(pts[i:j],pts[i+1:j+1]))
-
                         if min(dx,dy,abs(dx-dy))<=2e-5:
                             spans.append((-L,ti,i,j,oldlen,(tuple(a),tuple(b)),0))
                         else:
@@ -7845,7 +8185,6 @@ def skew_match(board, routes, options, target_folder):
                                     length=math.dist(chain[ai],chain[ai+1])
                                     if length>=.25:spans.append((-length,ti,i,j,oldlen,chain,ai))
             spans.sort(key=lambda q:(len(q[5])>2,q))
-            candidates=[]
             for _,ti,i,j,oldlen,chain,ai in spans:
                 t=current['tracks'][ti];a,b=chain[ai],chain[ai+1];w=t['w'][i];L=math.dist(a,b);layer=t['layer']
                 baselen=sum(math.dist(x,y) for x,y in zip(chain,chain[1:]))
@@ -7862,7 +8201,7 @@ def skew_match(board, routes, options, target_folder):
                     if extra<=.005:continue
                     c=max(w/2,.04);pitch=max(2*w+clearance,w+float(options.get('pair_gap',.2)));top=pitch-2*c
                     from common.meander import crests_shapes as _ma_shapes, dome_track as _ma_track
-                    for fi_,(n_,s_,r_,A_,F_) in enumerate(_ma_shapes(extra,L,w,clearance) if options.get('skew_shape','rounded')=='rounded' else []):
+                    for fi_,(n_,s_,r_,A_,F_) in enumerate(_skew_dome_shapes(extra,L,w,clearance,options) if options.get('skew_shape','rounded')=='rounded' else []):
                         leadspace=L-F_
 
                         for lead in [x for x in dict.fromkeys([leadspace/2,.05,leadspace-.05,leadspace*.25,leadspace*.75]) if x>=.05-1e-9 and leadspace-x>=.05-1e-9]:
@@ -7908,6 +8247,47 @@ def skew_match(board, routes, options, target_folder):
                                 rank=(-added,1,height,coupling,j-i,ti,i,j,side,lead,shape,chain,ai)
                                 candidates.append((rank,ti,i,j,points,added,w,layer,shape,None))
                 if len(candidates)>100:break
+
+
+
+            if options.get('skew_shape','rounded')=='rounded' and options.get('skew_items','1')=='1':
+                from common.meander import crests_shapes as _ma_shapes, dome_track as _ma_track
+                for ti,t in enumerate(current['tracks']):
+                    if t['net']!=net or not t.get('items'):continue
+                    layer=t['layer']
+                    for k,it in enumerate(t['items']):
+                        if it[0]!='L':continue
+                        a,b,w=tuple(it[1]),tuple(it[2]),it[3];L=math.dist(a,b)
+                        dx,dy=abs(a[0]-b[0]),abs(a[1]-b[1])
+                        if L<.25 or min(dx,dy,abs(dx-dy))>2e-5:continue
+                        other=t['items'][:k]+t['items'][k+1:]
+                        owned=[g for g in own.get(layer,[]) if g.distance(Point(a))>w and g.distance(Point(b))>w]
+                        owned+=[LineString(_skew_items_preview([q])[0]).buffer(q[-1]/2) for q in other
+                                if math.dist(q[1],a)>1e-9 and math.dist(q[2] if q[0]=='L' else q[3],b)>1e-9 and
+                                   math.dist(q[1],b)>1e-9 and math.dist(q[2] if q[0]=='L' else q[3],a)>1e-9]
+                        for tj,tt in enumerate(current['tracks']):
+                            if tj!=ti and tt['net']==net and tt['layer']==layer:
+                                owned.extend(LineString([pa,pb]).buffer(ww/2) for pa,pb,ww in zip(tt['pts'][:-1],tt['pts'][1:],tt['w']))
+                        selfgeo=unary_union(owned)
+                        for fraction in (1.,.5,.25,.125,.0625):
+                            added=delta*fraction
+                            if added<.01:continue
+                            for fi_,(n_,s_,r_,A_,F_) in enumerate(_skew_dome_shapes(added,L,w,clearance,options)):
+                                leadspace=L-F_
+                                for lead in [x for x in dict.fromkeys([leadspace/2,.05,leadspace-.05,leadspace*.25,leadspace*.75]) if x>=.05-1e-9 and leadspace-x>=.05-1e-9]:
+                                    for side in (1,-1):
+                                        points,sp_items=_ma_track((a,b),0,n_,s_,r_,A_,lead,side,w)
+                                        new=t['items'][:k]+sp_items+t['items'][k+1:]
+                                        full,_=_skew_items_preview(new)
+                                        line=LineString(points);copper=line.buffer(w/2)
+                                        if not LineString(full).is_simple or not line.is_simple or not boundary.covers(copper):continue
+                                        obs=obstacles.get(layer)
+                                        if obs is not None and copper.distance(obs)<clearance:continue
+                                        pocket=LineString(points[1:-1]).buffer(w/2)
+                                        if not selfgeo.is_empty and pocket.distance(selfgeo)<max(clearance,w):continue
+                                        coupling=min((line.distance(g) for g in partners.get(layer,[])),default=1e3)
+                                        rank=(-added,0,fi_,coupling,0,ti,k,0,side,lead,'dome',(a,b),0)
+                                        candidates.append((rank,ti,('item',k),None,points,added,w,layer,'dome',new))
             candidates.sort(key=lambda q:q[0])
             seen=set()
             for _,ti,i,j,points,added,w,layer,shape,sp_items in candidates:
@@ -7916,17 +8296,24 @@ def skew_match(board, routes, options, target_folder):
                 seen.add(key)
                 if report['tried_kicad_native']>=maxnative:break
                 candidate=copy.deepcopy(current);t=candidate['tracks'][ti]
-                if sp_items is not None:
-                    before=[['L',list(p),list(q),ww] for p,q,ww in zip(t['pts'][:i],t['pts'][1:i+1],t['w'][:i]) if math.dist(p,q)>1e-9]
-                    post=[['L',list(p),list(q),ww] for p,q,ww in zip(t['pts'][j:],t['pts'][j+1:],t['w'][j:]) if math.dist(p,q)>1e-9]
-                    t['items']=before+sp_items+post
-                t['pts']=t['pts'][:i]+points+t['pts'][j+1:]
-                t['w']=t['w'][:i]+[w]*(len(points)-1)+t['w'][j:]
-                for name in ('nm_pts','nm_w'):t.pop(name,None)
-                if sp_items is not None:
+                if isinstance(i,tuple):
+                    t['items']=sp_items;t['pts'],t['w']=_skew_items_preview(sp_items)
+                    for name in ('nm_pts','nm_w'):t.pop(name,None)
                     from common.track_items import validate as _bi_validate
                     try:_bi_validate(t)
                     except ValueError:continue
+                elif sp_items is not None:
+                    before=[['L',list(p),list(q),ww] for p,q,ww in zip(t['pts'][:i],t['pts'][1:i+1],t['w'][:i]) if math.dist(p,q)>1e-9]
+                    post=[['L',list(p),list(q),ww] for p,q,ww in zip(t['pts'][j:],t['pts'][j+1:],t['w'][j:]) if math.dist(p,q)>1e-9]
+                    t['items']=before+sp_items+post
+                if not isinstance(i,tuple):
+                    t['pts']=t['pts'][:i]+points+t['pts'][j+1:]
+                    t['w']=t['w'][:i]+[w]*(len(points)-1)+t['w'][j:]
+                    for name in ('nm_pts','nm_w'):t.pop(name,None)
+                    if sp_items is not None:
+                        from common.track_items import validate as _bi_validate
+                        try:_bi_validate(t)
+                        except ValueError:continue
                 report['tried_kicad_native']+=1
                 nd=native_route_verify(board,candidate,options,folder/('candidate_%03d'%report['tried_kicad_native']))
                 ne=native_skew_error(nd)
@@ -7935,7 +8322,7 @@ def skew_match(board, routes, options, target_folder):
 
                 oldmap={(q['rule'],q['net']):q['delta_mm'] for q in errors}
                 safe=all(q['delta_mm']<=oldmap.get((q['rule'],q['net']),q['tolerance_mm'])+1e-6 for q in ne)
-                if allowed(drc,nd) and safe and newscore<oldscore-.005:
+                if skew_allowed(drc,nd,net) and safe and newscore<oldscore-.005:
                     report['move_records'].append(dict(net_name=net,rule=error['rule'],layer=layer,shaping=shape,geometric_plus_mm=added,
                        before_skew_mm=error['delta_mm'],rest=[q for q in ne if q['rule']==error['rule']],evidence=str(folder/('candidate_%03d'%report['tried_kicad_native']))))
                     current=candidate;drc=nd;moved=True;native_folder=folder/('candidate_%03d'%report['tried_kicad_native'])
@@ -8153,10 +8540,18 @@ esp61 = 0
 WITHOUT = {}
 for spec in args.get('gnd_without_via', '').split(';'):
     if ':' in spec: r_, nums = spec.split(':'); WITHOUT[r_] = set(nums.split(','))
+
+
+STACK_GND = args.get('stack_gnd', '1' if STD_ON else '0') == '1'
 for _g in sorted(AREA_NETS):
+    _stack = set()
     for k in by_net.get(_g, []):
         if D['pads'][k]['num'] in WITHOUT.get(D['pads'][k]['ref'], ()): continue
         if any(L in GND_LAYERS for L in D['pads'][k]['layers']): continue
+        if STACK_GND:
+            _location = (round(D['pads'][k]['x'], 4), round(D['pads'][k]['y'], 4), tuple(sorted(D['pads'][k]['layers'])))
+            if _location in _stack: continue
+            _stack.add(_location)
         units.append('GND#%d' % k)
 
 units += [g for g in sorted(GNDS - AREA_NETS) if len(by_net.get(g, [])) > 1]
@@ -8376,14 +8771,60 @@ def export_data(tracks, vias, conf, absent=None, checkpoint=False, raw_data=Fals
 
     if raw_data or args.get('short_circuit_protection', '0') != '1': return data
     return r44_export(data, checkpoint=checkpoint)
+def r44_rule_check(data, witnesses=False):
+    global U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _KA_META, _R44_CAPTURE
+    saved = U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _R44_CAPTURE
+    meta = dict(_KA_META) if globals().get('KA') is not None else None
+    try:
+        U = {}; _GEO = {}; PAIRS = []; PAIRS_RAW = []; FIX_PAIRS = []
+        _R44_CAPTURE = dict(geo={},vias={},bad={}) if witnesses else None
+        items={id(q):(key,i) for key in ('tracks','vias') for i,q in enumerate(data[key])}
+        for key in ('tracks', 'vias'):
+            for q in data[key]:
+                u = q.get('unit') or q['net']
+                r = U.setdefault(u, dict(net=q['net'], tracks=[], vias=[]))
+                if r['net'] != q['net']:
+
+                    if key != 'vias': raise ValueError('R44: ambiguous output unit')
+                r[key].append(q)
+        if witnesses:
+            for u,r in U.items():
+                gs=_unit_geo(u,r); index=0
+                for t in r['tracks']:
+                    for si in range(len(t['w'])):
+                        _R44_CAPTURE['geo'][id(gs[index][1])]=(*items[id(t)],si); index+=1
+                for v in r['vias']:
+                    key=items[id(v)]
+                    _R44_CAPTURE['vias'].setdefault((u,v['x'],v['y']),[]).append(key)
+                    for li in range(NL):
+                        if globals().get('KA') is not None and LAYERS[li] not in v.get('layers',LAYERS): continue
+                        _R44_CAPTURE['geo'][id(gs[index][1])]=key; index+=1
+                assert index==len(gs),'R44: incomplete primitive geometry mapping'
+        exact_conflicts()
+        return (list(PAIRS), _R44_CAPTURE['bad']) if witnesses else list(PAIRS)
+    finally:
+        U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _R44_CAPTURE = saved
+        if meta is not None:
+            _KA_META.clear(); _KA_META.update(meta)
+
+
+r44_rule_check.r44_witnesses = True
+
+
 def r44_export(data, checkpoint=False, board=None, pairs=None, units_extra=None):
     board = D if board is None else board
+
+
+
+    if args.get('r44_part') == '1' and 'options' not in data:
+        data = dict(data, options=args)
     unit_list = {u:r['net'] for u,r in U.items()}
     for u, n in (units_extra or {}).items(): unit_list.setdefault(u, n)
     output_nets = {q['net'] for k in ('tracks', 'vias', 'zone_list', 'zones') for q in data.get(k, [])}
     important = {n: max(1, 20 - int(cls(n).get('prio', 10))) for n in output_nets}
     important.update({u:important.get(n, 1) for u,n in unit_list.items() if u.startswith('GND#')})
-    result = export_safe(board, data, unit_list, important, list(PAIRS) if pairs is None else list(pairs), checkpoint=checkpoint)
+    check = r44_rule_check if args.get('r44_part') == '1' and board is D else None
+    result = export_safe(board, data, unit_list, important, list(PAIRS) if pairs is None else list(pairs), checkpoint=checkpoint, rule_check=check)
     if checkpoint:
         result = dict(result)
         result['short_circuit_units'] = {u: (board['pads'][int(u[4:])]['net'] if u.startswith('GND#') else unit_list.get(u, u[4:] if u.startswith('FIX#') else u)) for u in result['failed']}
@@ -8513,6 +8954,7 @@ def budget_message():
         return 'Work budget (work_max=%d, consumed=%d jobs)' % (WORK_MAX, work_total())
     return 'Compute time budget (cpu_max=%.0f s)' % CPU_MAX
 
+
 def time_tight(share=0.8):
     if BUDGET_WORK:
 
@@ -8521,8 +8963,6 @@ def time_tight(share=0.8):
     if _LEARN_ON and _LEARN_STOP: return True
     if _LEARN_ON and (args.get('learning_budget') == 'adaptive' or _LEARN_POLICY):
         return CPU_MAX > 0 and time.process_time() > share * CPU_MAX
-
-
     return CPU_MAX > 0 and (search_cpu() - observer_cpu()) > share * CPU_MAX
 
 
@@ -8539,7 +8979,6 @@ elif 'start' in args:
         _sv = dict(v) if args.get('rest_repair') == '1' else dict(x=v['x'], y=v['y'])
         if v.get('current_via'): _sv['gr'] = 1
         byn.setdefault(v['net'], ([], []))[1].append(_sv)
-
 
     NEW = {r for r in args.get('new', '').split(',') if r}
     new_nets = {D['pads'][k]['net'] for k in range(len(D['pads'])) if D['pads'][k]['ref'] in NEW} - AREA_NETS - {''}
@@ -8618,7 +9057,6 @@ else:
                 and time.process_time() >= .65 * CPU_MAX):
 
 
-
             CPU_MAX = min(_LEARN_MAX, max(CPU_MAX, time.process_time() * len(_series) / _i / .65))
             print('Learning budget: initial build progress, %.1f CPU-s' % CPU_MAX, flush=True)
         if time_tight():
@@ -8632,6 +9070,14 @@ else:
             initial_build_checkpoint()
             _learn_cp_cpu = time.process_time()
 print('Iteration 1: %.0fs, incomplete %d' % (time.time() - t0, len(fail)))
+if NECK_AUTO > 0 and NECK <= 0:
+    for _n in sorted({U.get(u, {}).get('net', u) for u in fail if not u.startswith(('GND#', 'FIX#'))}):
+        _C = cls(_n)
+        if _C.get('prio', 8) < 8 and _C['wmin'] > max(NECK_W, DRU_MIN.get(_n, 0.)) and _n in by_net_g:
+            NECK_NETS.add(_n); UNREACHABLE.pop(_n, None)
+            for _k in [k for k in NECK_CACHE if k[0] == _n]: del NECK_CACHE[_k]
+    if NECK_NETS: print('Neck automatic (neck_auto=%g mm) for %s' % (NECK_AUTO, sorted(NECK_NETS)), flush=True)
+
 class _RoutingLoop:
     VERSION = 'routing-loop-v4-local-cpu'
 
@@ -8708,7 +9154,6 @@ class _RoutingLoop:
         if not math.isfinite(v) or not lo <= v <= hi:
             raise ValueError('%s must be between %s and %s' % (key, lo, hi))
         return v
-
     @staticmethod
     def validate_move(m):
         if isinstance(m,dict) and m.get('category') in ('window_layer','ball_via','priority'):
@@ -8942,6 +9387,7 @@ class _RoutingLoop:
                         targets.append((round(x,5),round(y,5)))
                         x=G['X0']+round((x-G['X0'])/G['RES'])*G['RES']; y=G['Y0']+round((y-G['Y0'])/G['RES'])*G['RES']
                         if .099999<=math.dist((v['x'],v['y']),(x,y))<=.500001: targets.append((round(x,5),round(y,5)))
+
             targets=sorted(set(targets),key=lambda p:(max(0., G['VIA_D']/2 + G['DRC_CLR'] - min(math.dist(p,q) for q in c['points'])),math.dist(p,(v['x'],v['y'])),p))
             for target in targets[:limit]:
                 yield dict(category='via',unit=u,via=i,goal=list(target),cur_state=digest)
@@ -9133,6 +9579,7 @@ class _RoutingLoop:
                 if G.get('_AL') is not None:G['_AL'].install_router()
             finally: sys.argv=argv
         return original
+
     def apply(self,m,c):
         G=self.G; category=m['category']; owner=m.get('unit'); touched=[]
         if category in ('window_layer','ball_via','priority'):
@@ -9210,7 +9657,6 @@ class _RoutingLoop:
             pair_reason=self.pair_gate(p0,p1,c)
             if m['category'] in ('via','layer_name','window_layer','ball_via') and pair_reason and 'outside' in pair_reason:
                 raise ValueError(pair_reason)
-
             if m['category'] in ('part','priority') or pair_reason is not None:
                 if len(touched)>int(G['args'].get('loop_new_max','4' if self.large else '24')):
                     raise ValueError('too many units for a cheap rerouting move')
@@ -9270,6 +9716,7 @@ class _RoutingLoop:
         return ok
 
     def export(self,c,digest,quick=False):
+
         d=self.exchange/('%04d_%s'%(self.rounds,digest[:12]));d.mkdir(parents=True,exist_ok=True)
         G=self.G;b=c['bbox'];margin=.5;b=[b[0]-margin,b[1]-margin,b[2]+margin,b[3]+margin]
         scale=min(160,1000/max(b[2]-b[0],b[3]-b[1]));size=(max(1,int((b[2]-b[0])*scale)),max(1,int((b[3]-b[1])*scale)))
@@ -9426,7 +9873,6 @@ def local_search_mask(pairs, open_, radius):
         ks = [int(u[4:])] if u.startswith('GND#') else by_net.get(u, [])
         boxes = [D['pads'][k]['bbox'] for k in ks]
         if not boxes: continue
-
         region(min(b[0] for b in boxes), min(b[1] for b in boxes),
                max(b[2] for b in boxes), max(b[3] for b in boxes),
                6.1 + radius if u.startswith('GND#') else (WINDOW or 3.0) + radius)
@@ -9529,10 +9975,20 @@ def endgame(conf, pairs, level, seed, repair=False):
 
 
 
-MOVE = args.get('move', '0') == '1'
+_BGA_REST_REFS = {f['ref'] for f in D.get('fps', [])
+                  if BGA_REST and 'BGA' in (f.get('fp', '') + f.get('lib', '')).upper()}
+_BGA_REST_PADS = [p for p in D['pads'] if p['ref'] in _BGA_REST_REFS]
+_BGA_REST_FIELDS = []
+for _ref in sorted(_BGA_REST_REFS):
+    _ps = [p for p in _BGA_REST_PADS if p['ref'] == _ref]
+    if _ps:
+        _BGA_REST_FIELDS.append((min(p['bbox'][0] for p in _ps), min(p['bbox'][1] for p in _ps),
+                                 max(p['bbox'][2] for p in _ps), max(p['bbox'][3] for p in _ps)))
+_BGA_REST_ACTIVE = BGA_REST and bool(_BGA_REST_FIELDS)
+MOVE = args.get('move', '0') == '1' or _BGA_REST_ACTIVE
 MOVE_MAX = int(args.get('move_max', '80'))
-MOVE_SITES = int(args.get('move_sites', '10'))
-MOVE_GROUP = int(args.get('move_group', '25'))
+MOVE_SITES = int(args.get('move_sites', '32' if _BGA_REST_ACTIVE else '10'))
+MOVE_GROUP = int(args.get('move_group', '40' if _BGA_REST_ACTIVE else '25'))
 MOVE_SHARE = float(args.get('move_share', '0.25'))
 MOVE_ITER = int(args.get('move_iter', '10'))
 
@@ -9543,13 +9999,21 @@ MOVE_STRATEGY = (dict(R=2.0, series='core_set', warm=True), dict(R=3.5, series='
              dict(R=2.0, series='core_set', repair=True), dict(R=5.0, series='core_set'))
 MOVE_WARM_PF = float(args.get('move_warm_pf', '50'))
 _zs = dict(n=0, ok=0, cpu=0.0, work=0, quiet=0, best=None, log=None)
-
 MOVE_POLICY = json.load(open(args['move_policy']))['table'] if args.get('move_policy') else None
+
+
 def _move_pads2(x, y):
     return sum(1 for p in D['pads'] if abs(p['x'] - x) <= 2.0 and abs(p['y'] - y) <= 2.0)
 
+
 def _move_series(site):
-    if not MOVE_POLICY: return list(enumerate(MOVE_STRATEGY))
+    if not MOVE_POLICY:
+        result = list(enumerate(MOVE_STRATEGY))
+        if _BGA_REST_ACTIVE and args.get('move', '0') != '1':
+
+
+            result.insert(0, (len(MOVE_STRATEGY), dict(R=2.0, series='core_set', warm=True, repair=True, hard=True)))
+        return result
     k = len(site['core_set']); p = _move_pads2(site['x'], site['y'])
     layer_name = '%s|k%d|p%d' % (site['type_'], min(k, 3), 0 if p <= 8 else 1 if p <= 20 else 2)
     tab = MOVE_POLICY.get(layer_name) or MOVE_POLICY.get(site['type_']) or {}
@@ -9584,6 +10048,25 @@ def _move_sites(pairs, open_):
             seen.append((p['x'], p['y']))
             st.append(dict(type_='open_items', x=p['x'], y=p['y'], core_set={u}))
             if len(seen) >= 4: break
+    if _BGA_REST_ACTIVE and args.get('move', '0') != '1':
+
+
+
+        nearby = [s for s in st if any(a-3 <= s['x'] <= c+3 and b-3 <= s['y'] <= d+3
+                                    for a,b,c,d in _BGA_REST_FIELDS)]
+        far = [s for s in st if not any(a-3 <= s['x'] <= c+3 and b-3 <= s['y'] <= d+3
+                                         for a,b,c,d in _BGA_REST_FIELDS)]
+        st = nearby
+
+
+        for p in _BGA_REST_PADS:
+            u = 'GND#%d' % D['pads'].index(p) if p['net'] in AREA_NETS else p['net']
+            if u not in open_ or u in FIXED: continue
+            if any(u in s['core_set'] and math.hypot(p['x']-s['x'], p['y']-s['y']) <= 1.0 for s in st): continue
+            st.append(dict(type_='open_items', x=p['x'], y=p['y'], core_set={u}))
+
+
+        st += far
     return st
 
 
@@ -9600,8 +10083,6 @@ def _move_spacing(r, p):
 
 MOVE_LOCAL = args.get('move_local', '1') == '1'
 MOVE_CHK = args.get('move_chk', '0') == '1'
-
-
 _MOVE_BORDER = _DMAX + max(DRC_HOLE, VIA_DR / 2 + VIA_R + HOLE_CLR, VIA_DR / 2 + HOLE_CLR, VIA_DR / 2 + H2H) + VIA_R + 0.05
 
 
@@ -9673,7 +10154,8 @@ def move_attempt(site, strategy, seed):
     before, _ = _move_value(group, X)
     save = {w: copy.deepcopy(U[w]) for w in group if w in U}; fail_before = {w for w in group if w in fail}
     hsave = hist.copy(); PFs = PF[0]; soft = CONS_SOFT[0]; CONS_SOFT[0] = False; qf = SOURCE_FREE[0]
-    SOURCE_FREE[0] = bool(strategy.get('repair')) or qf; HARD_FOREIGN[0] = False
+    hf = HARD_FOREIGN[0]
+    SOURCE_FREE[0] = bool(strategy.get('repair')) or qf; HARD_FOREIGN[0] = bool(strategy.get('hard'))
     rng_ = budget_rng(5000 + seed)
     other = [w for w in group if w not in site['core_set']]
     if strategy.get('warm'):
@@ -9687,25 +10169,36 @@ def move_attempt(site, strategy, seed):
         hist[:] = 0; PF[0] = min(1.0, PFMAX) if PFMAX is not None else 1.0
         if strategy['series'] == 'core_set': order = core_set + sorted(other, key=lambda w: (grp(w)[0], rng_.rand()))
         else: order = sorted(group, key=lambda w: rng_.rand())
-    ok = {}; history = []
-    for w in pair_series(order): ok[w] = route_unit(w)
-    for _k in range(MOVE_ITER):
-        cfg = _move_conf(group, X); history.append(len(cfg))
-        if not cfg or time_tight(0.95): break
-        if len(history) >= 4 and min(history[-3:]) >= history[-4]: break
-        if strategy.get('warm') and len(history) >= 3 and min(history[-2:]) >= min(history[:-2]): break
-        for w, cells in cfg.items(): hist[np.array(cells, dtype=np.int64)] += 1.0
-        PF[0] *= 1.5
-        if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
-        for w in pair_series(sorted((w for w in group if w in cfg or not ok.get(w, True)), key=lambda w: rng_.rand())):
-            if not pair_unit(w): del_unit(w)
-            ok[w] = route_unit(w)
-    for w in group:
-        if ok.get(w, w in U): fail.discard(w)
-        else: fail.add(w)
-    post, _ = _move_value(group, X)
-    hist[:] = hsave; PF[0] = PFs; CONS_SOFT[0] = soft; SOURCE_FREE[0] = qf
+    ok = {}; history = []; aborted = False
+    _bga_budget_before = _BGA_REST_BUDGET[0]
+    _BGA_REST_BUDGET[0] = _BGA_REST_ACTIVE and args.get('move', '0') != '1'
+    try:
+        for w in pair_series(order): ok[w] = route_unit(w)
+        for _k in range(MOVE_ITER):
+            cfg = _move_conf(group, X); history.append(len(cfg))
+            if not cfg or time_tight(0.95): break
+            if len(history) >= 4 and min(history[-3:]) >= history[-4]: break
+            if strategy.get('warm') and len(history) >= 3 and min(history[-2:]) >= min(history[:-2]): break
+            for w, cells in cfg.items(): hist[np.array(cells, dtype=np.int64)] += 1.0
+            PF[0] *= 1.5
+            if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
+            for w in pair_series(sorted((w for w in group if w in cfg or not ok.get(w, True)), key=lambda w: rng_.rand())):
+                if not pair_unit(w): del_unit(w)
+                ok[w] = route_unit(w)
+        for w in group:
+            if ok.get(w, w in U): fail.discard(w)
+            else: fail.add(w)
+        post, _ = _move_value(group, X)
+    except _BgaRestBudget:
+
+
+        post = before; aborted = True
+    finally:
+        _BGA_REST_BUDGET[0] = _bga_budget_before
+        hist[:] = hsave; PF[0] = PFs; CONS_SOFT[0] = soft; SOURCE_FREE[0] = qf; HARD_FOREIGN[0] = hf
     taken = post < before
+    if _BGA_REST_ACTIVE and args.get('move', '0') != '1' and any(w in fail and w not in fail_before for w in group):
+        taken = False
     if not taken:
         for w in group:
             if w in U: del_unit(w)
@@ -9716,6 +10209,7 @@ def move_attempt(site, strategy, seed):
     cpu = time.process_time() - _tc; _zs['cpu'] += cpu
     if BUDGET_WORK: _zs['work'] += work_total() - _ta
     row.update(outcome='taken' if taken else 'rejected', before=before, after=post, history=history, cpu_s=round(cpu, 3))
+    if aborted: row['budget_abort'] = True
     _move_log(row)
     return taken
 
@@ -9784,6 +10278,13 @@ _AL = None
 if args.get('agent_loop') == '1':
     from codex.agent_loop.cur_state import AgentLoop
     _AL = AgentLoop(globals(), _AGENT_SAVED)
+
+
+FAIL_STILL = int(args.get('fail_still', '6' if NC is not None else '0')); _fs = [0, None]
+
+
+
+GOAL_FROM = int(args.get('goal_from', '0')); GOAL_HYSTERESIS = float(args.get('goal_hysteresis', '1.5' if NC is not None else '1.0')); _zg = [False]
 for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
     CONS_SOFT[0] = it <= int(args.get('cons_iter', '10'))
 
@@ -9812,7 +10313,9 @@ for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
     if not todo: break
     if time_tight():
         print('%s 80 %% used up: negotiation ends with %d conflicts' % (budget_message(), len(conf)), flush=True); break
-    if MOVE and it >= 8:
+
+
+    if MOVE and it >= 8 and not (_BGA_REST_ACTIVE and args.get('move', '0') != '1'):
         _zsum = len(conf) + len(fail)
         if _zs['best'] is None or _zsum < _zs['best']: _zs['best'] = _zsum; _zs['quiet'] = 0
         else: _zs['quiet'] += 1
@@ -9839,11 +10342,17 @@ for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
             _es['level'] += 1; _es['ab'] = it + 3
     else:
         _es['n'] = 0; _es['before'] = None
+    if FAIL_STILL and not conf and fail:
+        _fs[0] = _fs[0] + 1 if fail == _fs[1] else 1; _fs[1] = set(fail)
+        if _fs[0] >= FAIL_STILL:
+            print('Negotiation ends: no conflicts, %d units unchanged without a route for %d passes' % (len(fail), _fs[0]), flush=True); break
+    else: _fs[0] = 0
     for u, b in conf.items(): hist[np.array(b, dtype=np.int64)] += HINC
     PF[0] *= float(args.get('pfmul', '1.5'))
     if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
     fail_prev = fail; fail = set(); _next = set()
-    all_items = args.get('all_items', '1') == '1' and len(conf) > int(args.get('goal_from', '0'))
+    _zg[0] = len(conf) <= GOAL_FROM or (_zg[0] and len(conf) <= GOAL_FROM * GOAL_HYSTERESIS)
+    all_items = args.get('all_items', '1') == '1' and not _zg[0]
     close = ALL_CLOSE
     if CONVERGENCE_LOCAL:
         if len(conf) < _local_best[0]: _local_best[:] = [len(conf), 0]
@@ -9934,12 +10443,14 @@ if MOVE and _es['ran']:
 VIA_ANCHOR_ON[0] = False
 CONS_SOFT[0] = False
 
+
 _cf_checkpoint = exact_conflicts(); PAIRS_LAST = list(PAIRS)
 work_mark('before_post_run')
 negotiation_measure(it if 'it' in globals() else 1, _cf_checkpoint, 'before_post_run')
 if _ET and not _LEARN_ON: _ET.observe(_cf_checkpoint, it if 'it' in globals() else 1)
 json.dump(PAIRS_LAST, open(OUT.replace('.json', '_conflicts_before_widen.json'), 'w'))
 if ((BGA_PLAN and args.get('bga_budget', '0') == '1') or args.get('budget_before_post_run', '0') == '1' or globals().get('_EARLY_INFO') is not None) and time_tight() and (_cf_checkpoint or fail):
+
 
     _ct, _cv = export_geometry()
     _cc = {u:len(cs) for u,cs in _cf_checkpoint.items()}
@@ -9960,6 +10471,7 @@ def unit_len(u):
         return sum(math.dist(a, c) for t in r['tracks'] if not t.get('web') for a, c in zip(t['pts'][:-1], t['pts'][1:])) + 0.6 * n_sv(r)
     return sum(math.dist(a, c) for t in r['tracks'] for a, c in zip(t['pts'][:-1], t['pts'][1:])) + 0.6 * n_sv(r)
 def grp_key(u): return grp(u)[0]
+
 
 
 WT_KIND = None
@@ -10054,7 +10566,6 @@ if args.get('short') == '1' and not todo and not time_tight():
     if R19_SHORT: print('R19 shortening:', R19_SHORT_STAT, flush=True)
 
 
-
 SHORT_VIA = float(args.get('short_via', '8' if NC and 'start' not in args else '0'))
 if SHORT_VIA > 0 and NC is not None and not todo and not time_tight():
     t2 = time.time(); hist[:] = 0; PFs = PF[0]; PF[0] = 1e3; _CAND_IDX[0] = None; VIA_FACTOR[0] = SHORT_VIA
@@ -10085,6 +10596,9 @@ if SHORT_VIA > 0 and NC is not None and not todo and not time_tight():
         if not _n: break
     VIA_FACTOR[0] = 1.0; PF[0] = PFs
     print('Via round (via price x%g): %d vias saved, tracks %.1f mm longer for it (%.0fs)' % (SHORT_VIA, _saved, _more, time.time() - t2), flush=True)
+
+
+
 
 
 
@@ -10770,6 +11284,7 @@ if PAIR_NETS and not todo and not time_tight():
     print('Differential pairs (R29) coupled: %d' % pair_couple(), flush=True)
 if RET > 0 and not todo and not time_tight():
     _rvn = rv_post_run(); print('Return vias (Q2) after negotiation: %d added, %d superfluous removed' % _rvn, flush=True)
+
 if NC is not None and args.get('flow', '1') == '1':
     import os as _os
     sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -11098,8 +11613,6 @@ if PAD_CENTER:
     if _ns: print('Joints (R24): %d track ends set exactly on the centerline of their own track at the end' % _ns, flush=True)
     _net_copper = collinear_together() if args.get('collinear', '1') == '1' else 0
     print('Joints (R24): %d collinear support points merged; while routing (all passes)' % _net_copper, JOINT_STAT, flush=True)
-
-
 if args.get('via_fine_shift') == '1' and NC and not fail and not exact_conflicts() and not time_tight(): via_fine_shift()
 LENGTHS_REPORT = None
 if (args.get('length_list', '0') == '1' and SI_FIELDS or PAIR_NETS) and (PAIR_SEARCH_SPACE or not fail and not exact_conflicts()) and not time_tight(0.95):
@@ -11126,6 +11639,7 @@ if args.get('remaining_conflicts', '0') == '1':
     print('R45: %d via moves accepted, %.2f CPU-s' % (REST_REPORT['accepted'], REST_REPORT['cpu_s']), flush=True)
 
 
+
 def pin_access_rule_values(net):
     from analysis.coupling import coupling, sets
     from analysis.topology import topology
@@ -11145,9 +11659,9 @@ def pin_access_rule_values(net):
     return dict(coupling=k, **{key:t[key] for key in keys},
                 star_free=t['star']-t['star_pad'], sharp_free=t['sharp']-t['sharp_pad'])
 
-
 def pin_access_rule_assumption(before, post):
     return all(math.isfinite(post[k]) and post[k] <= v + 1e-6 for k,v in before.items())
+
 
 def pin_access_post_run():
     global _LOOP_DEADLINE
@@ -11167,7 +11681,6 @@ def pin_access_post_run():
     try:
         hist[:] = 0; PF[0] = 1e3; HARD_FOREIGN[0] = True
         _PZ_BUDGET_ACTIVE[0] = True; _LOOP_DEADLINE = deadline
-
         removed = []
         if PZ_REST:
             _loop_cpu_check()
@@ -11351,6 +11864,8 @@ if UNDER:
         ', narrowest %.3f instead of %.3f mm (%s)' % min((e['width'] - e['nominal'], e['width'], e['nominal'], e['net_name']) for e in _uf)[1:] if _uf else '',
         len(UNDER) - len(_uf)), flush=True)
 if UNREACHABLE: print('Unreachable (hard obstacles, pad has no exit):', {n: v for n, v in sorted(UNREACHABLE.items())})
+if ROOT_STAT['swapped']: print('Enclosed root (E126): %d nets with new root' % ROOT_STAT['swapped'], flush=True)
+if ZGROUPS: print('Zone groups (E126): %d pads attached over the original zone, %d deferred once' % (ZG_STAT['vacant'], ZG_STAT['later']), flush=True)
 
 MPV = []
 for _e in EPG:
@@ -11395,6 +11910,7 @@ _rest_final = export_data(tracks, vias, conf, raw_data=True,
     **({'pair_search_space_info': _PAIR_SEARCH_INFO} if PAIR_SEARCH_SPACE else {}),
     **({'final': 'early_abort' if _EARLY_INFO is not None else ('cpu_budget' if time_tight() else 'finished'),
         'learning_state': json.loads(_LEARN_SNAPSHOT)['learning_state'], 'learning_budget':json.loads(_LEARN_SNAPSHOT)['learning_budget']} if _LEARN_ON else {}))
+
 if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1' and REST_REPORT and NC and args.get('netclasses'):
     import tempfile
     from postprocessing.remaining_conflicts import parts_post_run, repair_keepout
@@ -11407,7 +11923,6 @@ if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1'
             _rp.write_text(json.dumps(_rest_final)); _bp.write_text(Path(sys.argv[1]).read_text())
             _rest_block = repair_keepout(globals().get('ST') or {})
             if _rest_block:
-
                 _rest_budget = 0
             _rp.with_name('routes_conflicts.json').write_text(json.dumps(PAIRS))
             _rest_parts = parts_post_run(str(_bp), args['netclasses'], str(_rp), _rest_budget)
@@ -11420,7 +11935,6 @@ if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1'
 _safe = rest_final(_rest_final)
 if args.get('skew', '0') == '1':
     _safe = skew_match(D, _safe, args, Path(OUT).with_suffix('.skew'))
-
 work_emergency_stop()
 if WORK_MEASURE:
     work_mark('finished')

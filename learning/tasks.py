@@ -140,20 +140,31 @@ def antenna_side(F):
     return s, rect
 
 
+def _arc_outer(cx, cy, r, a0, a1, faults=0.005, whole=False):
+    n = max(8 if whole else 1, math.ceil(abs(a1 - a0) / (2 * math.acos(r / (r + faults)))))
+    d = (a1 - a0) / n; R = r / math.cos(d / 2)
+    middle = [(cx + R * math.cos(a0 + (k + .5) * d), cy + R * math.sin(a0 + (k + .5) * d)) for k in range(n)]
+    return middle if whole else [(cx + r * math.cos(a0), cy + r * math.sin(a0))] + middle + [(cx + r * math.cos(a1), cy + r * math.sin(a1))]
+
+
 def pad_poly(p):
     w, h, f = p['w'], p['h'], p['shaping']
     if f == 'circle' or (f == 'oval' and abs(w - h) < 1e-6):
-        r = w / 2; pts = [(r * math.cos(2 * math.pi * k / 12), r * math.sin(2 * math.pi * k / 12)) for k in range(12)]
+        pts = _arc_outer(0.0, 0.0, w / 2, 0.0, 2 * math.pi, whole=True)
     elif f == 'oval':
-        a, b = max(w, h) / 2, min(w, h) / 2; m = a - b; pts = []
-        for k in range(7): t = -math.pi / 2 + math.pi * k / 6; pts.append((m + b * math.cos(t), b * math.sin(t)))
-        for k in range(7): t = math.pi / 2 + math.pi * k / 6; pts.append((-m + b * math.cos(t), b * math.sin(t)))
+        a, b = max(w, h) / 2, min(w, h) / 2; m = a - b
+        pts = _arc_outer(m, 0.0, b, -math.pi / 2, math.pi / 2) + _arc_outer(-m, 0.0, b, math.pi / 2, 3 * math.pi / 2)
         if h > w: pts = [(y, x) for x, y in pts]
     else:
-        c = min(w, h) * (p['rr'] if f == 'roundrect' else 0.0) * 0.6
+        r = min(w, h) * (p['rr'] if f == 'roundrect' else 0.0)
         x, y = w / 2, h / 2
-        pts = [(-x + c, -y), (x - c, -y), (x, -y + c), (x, y - c), (x - c, y), (-x + c, y), (-x, y - c), (-x, -y + c)] if c > 0.005 \
-            else [(-x, -y), (x, -y), (x, y), (-x, y)]
+        if r > 0.0005:
+            pts = []
+            for cx, cy, a0 in ((x - r, y - r, 0.0), (-x + r, y - r, math.pi / 2), (-x + r, -y + r, math.pi), (x - r, -y + r, 1.5 * math.pi)):
+                pts += _arc_outer(cx, cy, r, a0, a0 + math.pi / 2)
+            pts = [q for i, q in enumerate(pts) if math.dist(q, pts[i - 1]) > 1e-9]
+        else:
+            pts = [(-x, -y), (x, -y), (x, y), (-x, y)]
     th = math.radians(p['rot']); cs, sn = math.cos(th), math.sin(th)
 
 
@@ -178,6 +189,7 @@ INTERFACES = {
     'mclk':    dict(f_Hz=24.576e6, data_rate=24.576e6, tr_ns=1.5, z_se=50, rank=3),
 }
 
+
 def fast(category, group=None, **more):
     s = INTERFACES[category]; d = dict(category='fast' if s['rank'] >= 2 else 'signal', rank=s['rank'], f_Hz=s['f_Hz'], interface=category)
     if s.get('tr_ns'): d['tr_ns'] = s['tr_ns']
@@ -185,7 +197,6 @@ def fast(category, group=None, **more):
     if s.get('z_se'): d['z_ohm'] = s['z_se']
     if group: d['length_group'] = group; d['tolerance_mm'] = s.get('tol_mm')
     d.update(more); return d
-
 
 class Task:
     def __init__(self, seed, cu_layers, factor, level=0.0, axes=None, potential=False, package=None, generator_version=None):
@@ -238,7 +249,6 @@ class Task:
         return self.two_pole('R', {'0201': 'Resistor_SMD:R_0201_0603Metric', '0402': 'Resistor_SMD:R_0402_1005Metric',
                                   '0603': 'Resistor_SMD:R_0603_1608Metric', '0805': 'Resistor_SMD:R_0805_2012Metric',
                                   '1206': 'Resistor_SMD:R_1206_3216Metric', '2512': 'Resistor_SMD:R_2512_6332Metric'}[g], amount, a, b)
-
     def ic(self, p, fp, value, roles, current_val=None):
         F = fp_load(fp); too = roles(F['pads'])
         pins = {n: v[0] for n, v in too.items()}; type_ = {n: v[1] for n, v in too.items()}; fn = {n: v[2] for n, v in too.items()}
@@ -324,6 +334,7 @@ class Task:
             search(self.rnd, 'Connector_JST', [r'JST_XH_B2B-XH-A_1x02'])
         self.part('J', fp, 'VIN %g V' % v, {'1': vin, '2': 'GND'}, {'1': 'power_out', '2': 'power_in'}, pinned='left')
         self.c(vin, 'GND', '10uF', '1206'); self.blocks.append('Input %g V (%s)' % (v, category)); return vin, v, None
+
     def buck(self, vin, uin, uout, current_val, name):
         out = self.net_name(name, category='current_val', voltage=uout, current_A=current_val); sw = self.net_name('SW_' + name.strip('+'), category='sw', current_A=current_val)
         fb = self.net_name('FB_' + name.strip('+'), category='analog', rank=2); bst = self.net_name('BST_' + name.strip('+'), category='sw')
@@ -359,8 +370,6 @@ class Task:
         self.c(bst, sw, '100nF', '0402')
         self.r(out, fb, '100k'); self.r(fb, 'GND', self.rnd.choice(['22k', '33k', '10k']))
         if self.power_board:
-
-
             self.net_list[fb].update(function='feedback', function_reason='Buck output divider at the FB pin of ' + u)
         self.r(vin, 'EN_' + name.strip('+'), '100k'); self.r(out, 'PG_' + name.strip('+'), '100k')
         self.current_part[u] = None; self.rails[out] = current_val
@@ -401,6 +410,7 @@ class Task:
         self.part('Y', fp, self.rnd.choice(['16MHz', '24MHz', '32MHz', '25MHz']), {'1': xi, '3': xo, '2': 'GND', '4': 'GND'},
                   {'1': 'passive', '3': 'passive', '2': 'passive', '4': 'passive'})
         g = self.rnd.choice(['0201', '0402']); self.c(xi, 'GND', '12pF', g); self.c(xo, 'GND', '12pF', g)
+
     BGA_LEVELS = [
         (0, [r'TFBGA-100_8x8mm', r'LFBGA-100_10x10mm', r'TFBGA-121_10x10mm', r'LFBGA-144_10x10mm']),
         (3, [r'TFBGA-169_9x9mm_Layout13x13_P0.65', r'TFBGA-216_13x13mm', r'TFBGA-256_13x13mm', r'TFBGA-225_10x10mm_Layout15x15_P0.65']),
@@ -837,6 +847,24 @@ class Task:
         if real: operate = {r for r in operate if not r.startswith('J')}
         occupied = []
 
+        BORDER_PAD = 0.25
+        edge_pad = anchor_legal or real
+        from shapely.geometry import Polygon as _P, box as _box
+        inner = _P(outline[0], holes[0] if real else None).buffer(-BORDER_PAD, join_style=2) if edge_pad else None
+
+        def copper_box(r):
+            ps = [q for p in F[r]['pads'] if not p['npth'] for q in pad_poly(p)]
+            return (min(u for u, v in ps), min(v for u, v in ps), max(u for u, v in ps), max(v for u, v in ps)) if ps else None
+
+        def edge_free(r, X, Y):
+            b = copper_box(r)
+            return not edge_pad or b is None or inner.covers(_box(X + b[0], Y + b[1], X + b[2], Y + b[3]))
+
+        def inset(r, x0, y0, x1, y1):
+            b = copper_box(r) if edge_pad else None
+            if b is None: return dict(upper=0.0, bottom=0.0, left=0.0, right=0.0)
+            return dict(upper=max(0.0, BORDER_PAD - (b[1] - y0)), bottom=max(0.0, BORDER_PAD - (y1 - b[3])),
+                        left=max(0.0, BORDER_PAD - (b[0] - x0)), right=max(0.0, BORDER_PAD - (x1 - b[2])))
         def vacant(X, Y, c):
             x0, y0, x1, y1 = c
             r = (round(X, 3) + x0 - 0.3, round(Y, 3) + y0 - 0.3,
@@ -846,33 +874,33 @@ class Task:
             if all(r[2] <= b[0] or b[2] <= r[0] or r[3] <= b[1] or b[3] <= r[1] for b in occupied):
                 occupied.append(r); return True
             return False
-
         def border_slot(t, x0, y0, x1, y1):
-            w, h = x1 - x0, y1 - y0
+            w, h = x1 - x0, y1 - y0; e = inset(t['ref'], x0, y0, x1, y1)
 
 
             for s in [t['pinned']] + [s for s in ('upper', 'bottom', 'left', 'right') if s != t['pinned']]:
                 if s in ('upper', 'bottom'):
                     n_ = max(0, int((W - w) / 0.5))
-                    cand = [(-x0 + k * 0.5, -y0 if s == 'upper' else H - y1) for k in range(n_ + 1)]
+                    cand = [(-x0 + k * 0.5, -y0 + e['upper'] if s == 'upper' else H - y1 - e['bottom']) for k in range(n_ + 1)]
                 else:
                     n_ = max(0, int((H - h) / 0.5))
-                    cand = [(-x0 if s == 'left' else W - x1, -y0 + k * 0.5) for k in range(n_ + 1)]
+                    cand = [(-x0 + e['left'] if s == 'left' else W - x1 - e['right'], -y0 + k * 0.5) for k in range(n_ + 1)]
                 rnd.shuffle(cand) if s != 'bottom' else cand.sort(key=lambda p: abs(p[0] + (x0 + x1) / 2 - W / 2))
                 for X, Y in cand:
                     if X + x1 > W + 1e-6 or Y + y1 > H + 1e-6 or X + x0 < -1e-6 or Y + y0 < -1e-6: continue
+                    if not edge_free(t['ref'], X, Y): continue
                     if vacant(X, Y, (x0, y0, x1, y1)):
                         t['pinned'] = s; return X, Y
             raise GeneratorError('Task cannot be generated: no free edge spot for ' + t['ref'])
 
-        def operate_slot(c):
+        def operate_slot(c, r=None):
             x0, y0, x1, y1 = c
             cand = [(-x0 + i * 0.5, -y0 + j * 0.5)
                     for i in range(max(0, int((W - x1 + x0) / 0.5)) + 1)
                     for j in range(max(0, int((H - y1 + y0) / 0.5)) + 1)]
             rnd.shuffle(cand)
             for X, Y in cand:
-                if X + x1 <= W and Y + y1 <= H and vacant(X, Y, c): return X, Y
+                if X + x1 <= W and Y + y1 <= H and (r is None or edge_free(r, X, Y)) and vacant(X, Y, c): return X, Y
             raise GeneratorError('Task cannot be generated: no free spot for control element')
 
         def border_slot_prev(t, x0, y0, x1, y1):
@@ -901,7 +929,7 @@ class Task:
                 t['pinned'] = 'bottom'
                 X, Y = border_slot(t, x0,y0,x1,y1)
                 t['pinned'] = None
-            elif t['ref'] in operate: X, Y = operate_slot((x0, y0, x1, y1))
+            elif t['ref'] in operate: X, Y = operate_slot((x0, y0, x1, y1), t['ref'])
             elif real:
 
 
@@ -948,7 +976,7 @@ class Task:
         for p in pads:
             if p['net'] and cnt[p['net']] < 2: p['net'] = ''; p['pintype'] = ''
         nets = sorted({p['net'] for p in pads if p['net']})
-        version = self.version + ('+anchor-legal1' if anchor_legal else '') + ('+r35-structure1' if structure else '')
+        version = self.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or real else '') + ('+r35-structure1' if structure else '')
         B = dict(src='task seed=%d (learning/tasks.py v%s)' % (self.seed, version), pads=pads, outline=outline, courtyards=crt, keepouts=keep,
                  fps=fps, via_keepout=[], nets=nets, netclass={n: 'Default' for n in nets}, net_classes={}, design={}, copper_graphic=[], cu_layers=L)
         if real:
@@ -960,8 +988,9 @@ class Task:
         clr = 0.075 if fine < 0.6 else 0.09
 
 
+
         sw_ = 0.075 if fine < 0.6 else 0.09 if fine < 0.75 else 0.1
-        router = dict(cu_layers=L, drc=clr, drcpad=clr + 0.01, clr=round(clr + 0.005, 3), edge=0.2, h2h=0.2, via=via, sigw=sw_, sigmin=sw_, vip='1')
+        router = dict(cu_layers=L, drc=clr, drcpad=clr + 0.01, clr=round(clr + 0.005, 3), edge=0.2, h2h=0.2, hole_clr=0.2, via=via, sigw=sw_, sigmin=sw_, vip='1')
         RG = dict(source='learning/tasks.py', layers_source=L, raw_data=dict(min_clearance=clr, min_track_width=router['sigmin'], min_copper_edge_clearance=0.2,
                   min_hole_clearance=0.2, min_hole_to_hole=0.2, netclass_clearance=clr, netclass_track=router['sigw'],
                   netclass_via=[float(v) for v in via.split('/')], via_dimensions=[dict(diameter=float(via.split('/')[0]), drill=float(via.split('/')[1]))]),
@@ -1054,7 +1083,7 @@ def generate(goal, seed=1, cu_layers=0, factor=0.0, blocks='auto', level=0.0, st
     if new:
         from learning.teacher import task_features, plausible
         A.update(axes={**level_axes(st, seed), 'ampere': max(A['rails_A'].values(), default=0), **ax, 'cu_layers': L, 'factor': f}, family=fam,
-                 lineage=dict(output_circuit=seed, family=fam), version=a.version + ('+anchor-legal1' if anchor_legal else '') + '+axes1')
+                 lineage=dict(output_circuit=seed, family=fam), version=a.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or a.version == REAL_VERSION else '') + '+axes1')
         B = json.load(open(os.path.join(goal, 'board.json')))
         A['mcu_ref'] = getattr(a, 'mcu_ref', None)
         A['features_task'] = task_features(A, B)

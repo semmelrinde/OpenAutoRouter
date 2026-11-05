@@ -107,11 +107,21 @@ if BUDGET_WORK:
             raise ValueError('budget=work does not support %s yet' % _name)
 _WORK = dict(unit=0, astar=0, checking=0)
 _WORK_MARKS = []
+_BGA_REST_BUDGET = [False]
+
+
+class _BgaRestBudget(BaseException):
+    pass
 
 
 def work_step(category):
     work_emergency_stop()
+    if _BGA_REST_BUDGET[0]:
+        if ((BUDGET_WORK and work_total() >= .95 * WORK_MAX) or
+                (not BUDGET_WORK and globals().get('CPU_MAX', 0) > 0 and time.process_time() >= .95 * CPU_MAX)):
+            raise _BgaRestBudget()
     if WORK_MEASURE: _WORK[category] += 1
+
 
 def work_emergency_stop():
     if BUDGET_WORK and globals().get('CPU_MAX', 0) > 0 and time.process_time() >= CPU_MAX:
@@ -146,6 +156,11 @@ def budget_rng(salt):
 
 
 
+def _native_original_zones_contract(options, zones):
+    if not (options.get('bga_rest')=='1' or options.get('skew_shapes')=='entire'):return False
+    if not options.get('kicad_native_zones') or not isinstance(zones,list) or not zones:return False
+    if not all(isinstance(z,dict) and z.get('zone_id') and z.get('native_layers') and z.get('native_outlines') for z in zones):return False
+    return len({z['zone_id'] for z in zones})==len(zones)
 def native_route_verify(board, routes, options, folder, export=False):
     import shutil
     from common import slots as PL
@@ -171,9 +186,22 @@ def native_route_verify(board, routes, options, folder, export=False):
         (folder/'runs.json').write_text(json.dumps(runs, indent=2))
         if r['cur_state'] != 'ok': raise RuntimeError('Native acceptance '+tag+': '+str(r))
     pcb = folder/'board.kicad_pcb'
-    call('import', python_command(root/'kicad/import_routes.py', folder/'base.kicad_pcb', rp,
-         folder/'zones.json', pcb, 'project=1', 'cu_layers='+str(board.get('cu_layers',4)),
-         'via='+options.get('via', (rules.get('router') or {}).get('via','0.45/0.20'))))
+    original=False
+    if _native_original_zones_contract(options,zones):
+
+
+
+        (folder/'.real_curve').touch()
+        call('zones_contract',python_command(root/'learning/real_curve_kicad_native.py','zone_list',folder/'base.kicad_pcb',folder/'original.zones.json'))
+        native=json.loads((folder/'original.zones.json').read_text())
+        original=({z['zone_id']:z for z in native}=={z['zone_id']:z for z in zones})
+        (folder/'zones_contract.json').write_text(json.dumps(dict(native_originals=original,count=len(zones))))
+    extra=['cu_layers='+str(board.get('cu_layers',4)), 'via='+options.get('via',(rules.get('router') or {}).get('via','0.45/0.20'))]
+    if original:
+        call('import',python_command(root/'learning/real_curve_kicad_native.py','import_',folder/'base.kicad_pcb',pcb,rp,folder/'zones.json',*extra))
+    else:
+        call('import', python_command(root/'kicad/import_routes.py', folder/'base.kicad_pcb', rp,
+             folder/'zones.json', pcb, 'project=1', *extra))
     cli = '/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli'
     call('drc', [cli,'pcb','drc','--format','json','--severity-all','-o',folder/'drc.json',pcb])
     d = json.loads((folder/'drc.json').read_text())
@@ -259,6 +287,8 @@ def multi_attempts(board_path, out, options, count):
 
 if args.get('skew', '0') not in ('0', '1'):
     raise ValueError('skew must be 0 or 1')
+if args.get('skew_shapes', '0') not in ('0', 'entire'):
+    raise ValueError('skew_shapes must be 0 or full')
 if 'attempts' in args:
     _attempts = int(args['attempts'])
     if _attempts < 0: raise ValueError('attempts must be a nonnegative integer')
@@ -424,7 +454,12 @@ def _hole_free(g):
 
 DESIGN_RULES_STRUCTURE = json.load(open(args['design_rules'])).get('structure') if 'design_rules' in args else None
 if 'design_rules' in args:
-    for _k, _v in json.load(open(args['design_rules']))['router'].items(): args.setdefault(_k, str(_v))
+    _rg = json.load(open(args['design_rules']))
+    for _k, _v in _rg['router'].items(): args.setdefault(_k, str(_v))
+
+
+    if 'netclasses' in args and 'hole_clr' not in args and args.get('hole_off_raw', '1') == '1' and (_rg.get('raw_data') or {}).get('min_hole_clearance'):
+        args['hole_clr'] = str(_rg['raw_data']['min_hole_clearance'])
 
 if args.get('keepout_list', '1') == '1' and D.get('keepouts'):
 
@@ -714,7 +749,13 @@ BGA_FANOUT = NC is not None and ((NLAY >= 6 and args.get('bga_fanout', '0') == '
 BGA_PLAN = BGA_FANOUT and (args.get('bga_plan', '0') == '1' or BGA_ESCAPE)
 if BGA_ESCAPE: args.setdefault('bga_budget', '1')
 BGA_TIGHT = BGA_PLAN and args.get('bga_lanes', '0') == '1'
+if args.get('bga_rest', '0') not in ('0', '1'):
+    raise ValueError('bga_rest must be 0 or 1')
+BGA_REST = args.get('bga_rest', '0') == '1'
+if BGA_REST and (NC is None or NLAY < 4):
+    raise ValueError('bga_rest=1 needs netclasses= and at least four layers')
 PAD_EXTRA = 0.000001 if BGA_TIGHT else 0.006
+
 
 POTENTIAL_PLAN = None
 LAYER_STACK = False
@@ -855,7 +896,7 @@ for k, p in enumerate(D['pads']):
         p.setdefault('cells', {})[L] = np.flatnonzero(m_core)
         p.setdefault('bcells', {})[L] = np.flatnonzero(m_buf)
 def pad_hull(p, L, spacing, model):
-    poly = shapely.union_all([Polygon(q) for q in p['polys'][L]])
+    poly = core_set = shapely.union_all([Polygon(q) for q in p['polys'][L]])
     mk = (p.get('mask') or {}).get(L, 0.0)
     if model and mk > spacing:
         poly = poly.buffer(mk - spacing + 0.01, join_style=2)
@@ -864,10 +905,15 @@ def pad_hull(p, L, spacing, model):
         hole = hole.buffer(max(0.0, HOLE_CLR - spacing), 32)
         poly = shapely.union_all([poly, hole])
     elif HOLE_CLR > spacing and p.get('drill', 0) > 0:
-        hole = Point(p['x'], p['y']).buffer(p['drill'] / 2 + HOLE_CLR - spacing, 32)
+
+        hole = (shapely.union_all([Polygon(q) for q in p['hole_polys']]).buffer(HOLE_CLR - spacing, 32) if NC is not None and p.get('hole_polys')
+                else Point(p['x'], p['y']).buffer(p['drill'] / 2 + HOLE_CLR - spacing, 32))
         poly = shapely.union_all([poly, hole])
     if not model and mk > spacing:
         poly = poly.buffer(mk - spacing + 0.01, join_style=2)
+    if p.get('clearance', 0.0) > DRCP + 1e-6:
+
+        poly = shapely.union_all([poly, core_set.buffer(p['clearance'] - DRCP, 32)])
     return poly
 
 
@@ -978,6 +1024,9 @@ if NC is not None and args.get('dru_width', '1') == '1':
     if _rg.get('circuit_board'): _dq = Path(_rg['circuit_board']).with_suffix('.kicad_dru')
     elif str(D.get('src', '')).endswith('.kicad_pcb'): _dq = Path(D['src']).with_suffix('.kicad_dru')
     else: _dq = Path(sys.argv[1]).with_suffix('.kicad_dru')
+    if not _dq.exists() and 'design_rules' in args:
+        from common.dru_condition import tasks_dru as _task_dru
+        _dq = _task_dru(args['design_rules'], _rg) or _dq
     if _dq is not None and _dq.exists():
         from analysis.design_rules import dru_rules as _dru_rules
         from common.dru_condition import min_width as _dru_mb
@@ -988,6 +1037,7 @@ if NC is not None and args.get('dru_width', '1') == '1':
             _m, _nm = _dru_mb(_dr, _n, (D.get('netclass') or {}).get(_n, 'Default'), _dl, _dn, TRACK_MIN)
             if _nm and max(_m.values()) > TRACK_MIN: DRU_MIN[_n] = max(_m.values())
         if DRU_MIN: print('DRU minimum widths (E95): %d nets, %s' % (len(DRU_MIN), sorted(set(DRU_MIN.values()))), flush=True)
+
 
 def cls(net):
     C = _cls(net)

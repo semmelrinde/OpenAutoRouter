@@ -336,6 +336,10 @@ def kicad_native(w, A, z, cpu_budget=None):
 
     kinds={};[kinds.__setitem__(v['type'],kinds.get(v['type'],0)+1) for v in d['violations'] if v['severity']=='error']
     z['native_champion']=dict(faults=errors,open_items=opened,kinds=dict(sorted(kinds.items())),version=d['kicad_version'],runs=runs)
+
+    evidence=lambda e:[i.get('description','')[:90] for i in e.get('items',[])][:3]
+    if opened:z['native_champion']['open_examples']=[evidence(u) for u in d['unconnected_items'][:4]]
+    if errors:z['native_champion']['error_examples']=[[v['type']]+evidence(v) for v in d['violations'] if v['severity']=='error'][:4]
     z['valid_model']=z['is_valid'];z['is_valid']=z['is_valid'] and not errors and not opened
     z.setdefault('outcome',{})['drc_error']=errors
 

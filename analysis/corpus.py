@@ -75,6 +75,12 @@ VIA_F = 1.0
 FIXED_FROM = ''
 DRC_REQUIRED = True
 ROUTER_EXTRA = ()
+
+
+
+ROUTER_BUDGET = False
+
+ROUTER_WORK_PRO_CPU_S = 50
 SIGMIN_UNIFORM = False
 DENSITY = False
 ROUTE = 1
@@ -87,6 +93,8 @@ SETTINGS = ''
 STEERING = ''
 PLACER_STANDARD = ()
 _MOD = []
+
+
 def ranking(cands):
     sys.path.insert(0, R)
     from learning import model as LM
@@ -296,22 +304,70 @@ def netclasses_run(o, bj, kj, vj, via_f=None):
     return K
 
 
+def router_budget(time_s, extra):
+    import math
+    if not math.isfinite(time_s) or time_s <= 0:
+        raise ValueError('time must be finite and positive')
+    extra = list(extra)
+    opt = dict(x.split('=', 1) for x in extra if '=' in x)
+    if ROUTER_BUDGET == 'work':
+        managed = dict(budget='work', work_max=str(max(1, round(time_s / .8 * ROUTER_WORK_PRO_CPU_S))),
+                       cpu_max=str(max(1, round(3 * time_s / .8))))
+        for key, value in managed.items():
+            if key in opt and opt[key] != value:
+                raise ValueError('router_budget=work: conflicting router=%s' % key)
+            if key not in opt:
+                extra.append(key + '=' + value)
+        opt.update(managed)
+    elif opt.get('labels_budget') == '1' and 'cpu_max' not in opt:
+        extra.append('cpu_max=%d' % time_s); opt['cpu_max'] = str(time_s)
+    elif ROUTER_BUDGET in (True, '1') and 'cpu_max' not in opt:
+        extra.append('cpu_max=%d' % round(time_s / .8)); opt['cpu_max'] = str(round(time_s / .8))
+    reserve = 60 if float(opt.get('cpu_max', '0')) > 0 else 0
+    return extra, max(time_s, float(opt.get('cpu_max', '0'))) + reserve
+
+
 def route_run(o, bj, kj, rj, it, time_s, log, style=None, gnd_layers=None):
     from common import slots as PL
     from postprocessing.short_circuit_protection import protection_on, protection_option
     extra = ['labels=' + os.path.splitext(rj)[0] + '_labels.npz'] + list(ROUTER_EXTRA) + (['style=' + style] if style and style != 'standard' else [])
-
-
-
-    opt = dict(x.split('=', 1) for x in extra if '=' in x)
-    if opt.get('labels_budget') == '1' and 'cpu_max' not in opt:
-        extra += ['cpu_max=%d' % time_s]; opt['cpu_max'] = str(time_s)
-    reserve = 60 if float(opt.get('cpu_max', '0')) > 0 else 0
+    extra, cpu_limit = router_budget(time_s, extra)
+    if ROUTER_BUDGET == 'work' and os.path.exists(rj):
+        raise ValueError('router_budget=work requires a fresh route file: ' + rj)
     r = PL.job([VPY, os.path.join(R, 'router/route_pf.py'), bj, rj, 'design_rules=' + os.path.join(o, 'design_rules.json'), 'netclasses=' + kj, 'gnd_layers=' + ','.join(gnd_layers or []),
-                 'iter=%d' % it, 'pf0=1', 'pfmul=1.25', 'hinc=1.0', 'goal_from=20', 'short=1'] + extra + protection_option(protection_on(extra)), cpu_s=time_s + reserve, log=log,
+                 'iter=%d' % it, 'pf0=1', 'pfmul=1.25', 'hinc=1.0', 'goal_from=20', 'short=1'] + extra + protection_option(protection_on(extra)),
+                cpu_s=cpu_limit, log=log,
                 env=dict(os.environ, PYTHONHASHSEED='0'))
+    if ROUTER_BUDGET == 'work':
+        with open(log + '.budget.json', 'w') as f:
+            json.dump(dict(router_budget='work', time_s=time_s, work_pro_cpu_s=ROUTER_WORK_PRO_CPU_S,
+                           options=dict(x.split('=', 1) for x in extra if '=' in x),
+                           slot_cpu_max=cpu_limit, job=r), f, indent=1)
     rc = r['rc'] if r['cur_state'] in ('ok', 'faults') else r['cur_state']
     return rc, r['cpu_s']
+
+
+def repair_run(rep, rounds_n, time_s):
+    cmd = [VPY, os.path.join(R, 'postprocessing/improve.py'), rep,
+           'rounds_n=%d' % rounds_n, 'parallel=3', 'ir=0']
+    if ROUTER_BUDGET != 'work':
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=time_s,
+                                  env=dict(os.environ, PYTHONHASHSEED='0'))
+        except subprocess.TimeoutExpired:
+            return None
+    from common import slots as PL
+    if os.path.exists(os.path.join(rep, 'routes_after.json')):
+        raise ValueError('router_budget=work requires a fresh repair output')
+    extra, _ = router_budget(time_s, ROUTER_EXTRA)
+    budget = dict(x.split('=', 1) for x in extra if '=' in x)
+    cmd += ['parallel=1', 'budget_cpu=0', 'opt=' + ' '.join(k + '=' + budget[k]
+             for k in ('budget', 'work_max', 'cpu_max'))]
+    run = PL.job(cmd, coordinate=True, log=os.path.join(rep, 'repair.log'),
+                  env=dict(os.environ, PYTHONHASHSEED='0'))
+    if run['cur_state'] != 'ok' or run['rc'] != 0:
+        raise RuntimeError('router_budget=work: repair without reproducible result: ' + str(run))
+    return run
 
 
 def placer_command(bj, kj, pj, rg, seed, sides, learned=(), explicit=()):
@@ -468,11 +524,7 @@ def one_board(d, out, it, time_s, drc=True, auto=False, seed=1, placer_args=(), 
                     rep = os.path.join(o, 'rep%s' % tag); os.makedirs(rep, exist_ok=True); tr_ = time.time()
                     for a_, b_ in ((bj, 'board.json'), (rj, 'routes.json'), (kj, 'netclasses.json'), (os.path.join(o, 'design_rules.json'), 'design_rules.json')):
                         shutil.copy(a_, os.path.join(rep, b_))
-                    try:
-                        subprocess.run([VPY, os.path.join(R, 'postprocessing/improve.py'), rep, 'rounds_n=%d' % REPAIR, 'parallel=3', 'ir=0'],
-                                       capture_output=True, text=True, timeout=time_s, env=dict(os.environ, PYTHONHASHSEED='0'))
-                    except subprocess.TimeoutExpired:
-                        pass
+                    repair_run(rep, REPAIR, time_s)
                     rn = os.path.join(rep, 'routes_after.json')
                     if os.path.exists(rn):
                         BN = json.load(open(os.path.join(rep, 'board_after.json'))); EN = rate_who(BN, KA, rn)
@@ -709,6 +761,12 @@ def main():
     global SETTINGS, STEERING; SETTINGS = kw.get('settings', ''); STEERING = kw.get('steering', '')
     if SETTINGS not in ('', 'off', 'learned'): sys.exit('settings=%s unknown (learned or off)' % SETTINGS)
     global ROUTER_EXTRA; ROUTER_EXTRA = tuple(x for x in kw.get('router', '').split(',') if x)
+
+
+    global ROUTER_BUDGET; ROUTER_BUDGET = kw.get('router_budget', 'work')
+    if ROUTER_BUDGET not in ('0', '1', 'work'):
+        sys.exit('router_budget must be 0, 1 or work')
+    router_budget(int(kw.get('time_s', '600')), ROUTER_EXTRA)
     global SIGMIN_UNIFORM; SIGMIN_UNIFORM = kw.get('sigmin_uniform', '0') == '1'
     ROUTE = int(kw.get('route', '1')); ROUTE_ONLY_AT_ERROR = kw.get('route_sparing', '0') == '1'
     auto = kw.get('auto', '0') == '1'; drc = kw.get('drc', '1') == '1'
@@ -717,7 +775,9 @@ def main():
     global DENSITY; DENSITY = kw.get('tight') == '1' or kw.get('density_measure') == '1'
     dirs = sorted(d for d in glob.glob(os.path.join(corpus, '*')) if os.path.isdir(d) and (not only or os.path.basename(d) in only))
     os.makedirs(out, exist_ok=True)
-    json.dump(dict(boards=[os.path.basename(d) for d in dirs], part_list=['our', 'auto'] if auto else ['our']),
+    budget_manifest = dict(router_budget='work', work_pro_cpu_s=ROUTER_WORK_PRO_CPU_S,
+                           time_s=int(kw.get('time_s', '600'))) if ROUTER_BUDGET == 'work' else {}
+    json.dump(dict(boards=[os.path.basename(d) for d in dirs], part_list=['our', 'auto'] if auto else ['our'], **budget_manifest),
               open(os.path.join(out, 'manifest.json'), 'w'), indent=1)
     with ThreadPoolExecutor(int(kw.get('parallel', '4'))) as ex:
         res = list(ex.map(lambda d: one_board(d, out, int(kw.get('iter', '60')), int(kw.get('time_s', '600')), drc, auto,

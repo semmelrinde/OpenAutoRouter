@@ -9,7 +9,7 @@
 [![good first issues](https://img.shields.io/github/issues/semmelrinde/OpenAutoRouter/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/semmelrinde/OpenAutoRouter/labels/good%20first%20issue)
 
 <p align="center">
-  <img src="docs/hero.png" width="780" alt="A generated 4-layer board with a BGA microcontroller, two buck converters and USB-C, placed and routed by Open Auto Router">
+  <img src="docs/hero.png" width="780" alt="A generated 4-layer board with a QFN microcontroller, an RF module and two buck converters, placed and routed by Open Auto Router (seed 9)">
 </p>
 
 Autorouters have a bad reputation: they connect every net, but the result does not look like a board a good engineer
@@ -29,11 +29,13 @@ flash, connectors) from the KiCad footprint library, then the tool chain places,
 ```bash
 git clone https://github.com/semmelrinde/OpenAutoRouter.git && cd OpenAutoRouter
 python3.12 -m venv .venv && .venv/bin/pip install numpy scipy shapely numba pillow   # core; requirements.txt has the learning extras
-.venv/bin/python learning/demo.py /tmp/oar seed=1
+.venv/bin/python learning/demo.py /tmp/oar seed=9
 ```
 
-A 4-layer board with 60 to 80 parts takes about two to four minutes on a laptop (Apple M-series; seeds 1 and 2 both
-come out valid). You get preview images of the placement (`pl_*.png`) and of every routed layer (`rt_*.png`) in `/tmp/oar/task_000001/`, and a summary line:
+This is the board in the picture above. A 4-layer board with 60 to 100 parts takes one to three minutes on a laptop
+(Apple M-series; 10 of the seeds 1 to 12 come out valid). Traces run at 0, 45 and 90 degrees and are tightened in their
+free corridor afterwards (`style=organic` allows any angle, `shaping=raw_data` skips the tightening). You get preview images of
+the placement (`pl_*.png`) and of every routed layer (`rt_*.png`) in `/tmp/oar/task_000009/`, and a summary line:
 valid or not, clearance conflicts, open connections, score. Change `seed=` for another board, `n=10` for ten boards in a
 row, `cu_layers=6` or `level=1` for harder ones. Same seed and same setup, same result.
 

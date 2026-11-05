@@ -198,10 +198,18 @@ esp61 = 0
 WITHOUT = {}
 for spec in args.get('gnd_without_via', '').split(';'):
     if ':' in spec: r_, nums = spec.split(':'); WITHOUT[r_] = set(nums.split(','))
+
+
+STACK_GND = args.get('stack_gnd', '1' if STD_ON else '0') == '1'
 for _g in sorted(AREA_NETS):
+    _stack = set()
     for k in by_net.get(_g, []):
         if D['pads'][k]['num'] in WITHOUT.get(D['pads'][k]['ref'], ()): continue
         if any(L in GND_LAYERS for L in D['pads'][k]['layers']): continue
+        if STACK_GND:
+            _location = (round(D['pads'][k]['x'], 4), round(D['pads'][k]['y'], 4), tuple(sorted(D['pads'][k]['layers'])))
+            if _location in _stack: continue
+            _stack.add(_location)
         units.append('GND#%d' % k)
 
 units += [g for g in sorted(GNDS - AREA_NETS) if len(by_net.get(g, [])) > 1]
@@ -421,14 +429,60 @@ def export_data(tracks, vias, conf, absent=None, checkpoint=False, raw_data=Fals
 
     if raw_data or args.get('short_circuit_protection', '0') != '1': return data
     return r44_export(data, checkpoint=checkpoint)
+def r44_rule_check(data, witnesses=False):
+    global U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _KA_META, _R44_CAPTURE
+    saved = U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _R44_CAPTURE
+    meta = dict(_KA_META) if globals().get('KA') is not None else None
+    try:
+        U = {}; _GEO = {}; PAIRS = []; PAIRS_RAW = []; FIX_PAIRS = []
+        _R44_CAPTURE = dict(geo={},vias={},bad={}) if witnesses else None
+        items={id(q):(key,i) for key in ('tracks','vias') for i,q in enumerate(data[key])}
+        for key in ('tracks', 'vias'):
+            for q in data[key]:
+                u = q.get('unit') or q['net']
+                r = U.setdefault(u, dict(net=q['net'], tracks=[], vias=[]))
+                if r['net'] != q['net']:
+
+                    if key != 'vias': raise ValueError('R44: ambiguous output unit')
+                r[key].append(q)
+        if witnesses:
+            for u,r in U.items():
+                gs=_unit_geo(u,r); index=0
+                for t in r['tracks']:
+                    for si in range(len(t['w'])):
+                        _R44_CAPTURE['geo'][id(gs[index][1])]=(*items[id(t)],si); index+=1
+                for v in r['vias']:
+                    key=items[id(v)]
+                    _R44_CAPTURE['vias'].setdefault((u,v['x'],v['y']),[]).append(key)
+                    for li in range(NL):
+                        if globals().get('KA') is not None and LAYERS[li] not in v.get('layers',LAYERS): continue
+                        _R44_CAPTURE['geo'][id(gs[index][1])]=key; index+=1
+                assert index==len(gs),'R44: incomplete primitive geometry mapping'
+        exact_conflicts()
+        return (list(PAIRS), _R44_CAPTURE['bad']) if witnesses else list(PAIRS)
+    finally:
+        U, _GEO, PAIRS, PAIRS_RAW, FIX_PAIRS, _R44_CAPTURE = saved
+        if meta is not None:
+            _KA_META.clear(); _KA_META.update(meta)
+
+
+r44_rule_check.r44_witnesses = True
+
+
 def r44_export(data, checkpoint=False, board=None, pairs=None, units_extra=None):
     board = D if board is None else board
+
+
+
+    if args.get('r44_part') == '1' and 'options' not in data:
+        data = dict(data, options=args)
     unit_list = {u:r['net'] for u,r in U.items()}
     for u, n in (units_extra or {}).items(): unit_list.setdefault(u, n)
     output_nets = {q['net'] for k in ('tracks', 'vias', 'zone_list', 'zones') for q in data.get(k, [])}
     important = {n: max(1, 20 - int(cls(n).get('prio', 10))) for n in output_nets}
     important.update({u:important.get(n, 1) for u,n in unit_list.items() if u.startswith('GND#')})
-    result = export_safe(board, data, unit_list, important, list(PAIRS) if pairs is None else list(pairs), checkpoint=checkpoint)
+    check = r44_rule_check if args.get('r44_part') == '1' and board is D else None
+    result = export_safe(board, data, unit_list, important, list(PAIRS) if pairs is None else list(pairs), checkpoint=checkpoint, rule_check=check)
     if checkpoint:
         result = dict(result)
         result['short_circuit_units'] = {u: (board['pads'][int(u[4:])]['net'] if u.startswith('GND#') else unit_list.get(u, u[4:] if u.startswith('FIX#') else u)) for u in result['failed']}
@@ -558,6 +612,7 @@ def budget_message():
         return 'Work budget (work_max=%d, consumed=%d jobs)' % (WORK_MAX, work_total())
     return 'Compute time budget (cpu_max=%.0f s)' % CPU_MAX
 
+
 def time_tight(share=0.8):
     if BUDGET_WORK:
 
@@ -566,8 +621,6 @@ def time_tight(share=0.8):
     if _LEARN_ON and _LEARN_STOP: return True
     if _LEARN_ON and (args.get('learning_budget') == 'adaptive' or _LEARN_POLICY):
         return CPU_MAX > 0 and time.process_time() > share * CPU_MAX
-
-
     return CPU_MAX > 0 and (search_cpu() - observer_cpu()) > share * CPU_MAX
 
 
@@ -584,7 +637,6 @@ elif 'start' in args:
         _sv = dict(v) if args.get('rest_repair') == '1' else dict(x=v['x'], y=v['y'])
         if v.get('current_via'): _sv['gr'] = 1
         byn.setdefault(v['net'], ([], []))[1].append(_sv)
-
 
     NEW = {r for r in args.get('new', '').split(',') if r}
     new_nets = {D['pads'][k]['net'] for k in range(len(D['pads'])) if D['pads'][k]['ref'] in NEW} - AREA_NETS - {''}
@@ -663,7 +715,6 @@ else:
                 and time.process_time() >= .65 * CPU_MAX):
 
 
-
             CPU_MAX = min(_LEARN_MAX, max(CPU_MAX, time.process_time() * len(_series) / _i / .65))
             print('Learning budget: initial build progress, %.1f CPU-s' % CPU_MAX, flush=True)
         if time_tight():
@@ -677,6 +728,14 @@ else:
             initial_build_checkpoint()
             _learn_cp_cpu = time.process_time()
 print('Iteration 1: %.0fs, incomplete %d' % (time.time() - t0, len(fail)))
+if NECK_AUTO > 0 and NECK <= 0:
+    for _n in sorted({U.get(u, {}).get('net', u) for u in fail if not u.startswith(('GND#', 'FIX#'))}):
+        _C = cls(_n)
+        if _C.get('prio', 8) < 8 and _C['wmin'] > max(NECK_W, DRU_MIN.get(_n, 0.)) and _n in by_net_g:
+            NECK_NETS.add(_n); UNREACHABLE.pop(_n, None)
+            for _k in [k for k in NECK_CACHE if k[0] == _n]: del NECK_CACHE[_k]
+    if NECK_NETS: print('Neck automatic (neck_auto=%g mm) for %s' % (NECK_AUTO, sorted(NECK_NETS)), flush=True)
+
 class _RoutingLoop:
     VERSION = 'routing-loop-v4-local-cpu'
 
@@ -753,7 +812,6 @@ class _RoutingLoop:
         if not math.isfinite(v) or not lo <= v <= hi:
             raise ValueError('%s must be between %s and %s' % (key, lo, hi))
         return v
-
     @staticmethod
     def validate_move(m):
         if isinstance(m,dict) and m.get('category') in ('window_layer','ball_via','priority'):
@@ -987,6 +1045,7 @@ class _RoutingLoop:
                         targets.append((round(x,5),round(y,5)))
                         x=G['X0']+round((x-G['X0'])/G['RES'])*G['RES']; y=G['Y0']+round((y-G['Y0'])/G['RES'])*G['RES']
                         if .099999<=math.dist((v['x'],v['y']),(x,y))<=.500001: targets.append((round(x,5),round(y,5)))
+
             targets=sorted(set(targets),key=lambda p:(max(0., G['VIA_D']/2 + G['DRC_CLR'] - min(math.dist(p,q) for q in c['points'])),math.dist(p,(v['x'],v['y'])),p))
             for target in targets[:limit]:
                 yield dict(category='via',unit=u,via=i,goal=list(target),cur_state=digest)
@@ -1178,6 +1237,7 @@ class _RoutingLoop:
                 if G.get('_AL') is not None:G['_AL'].install_router()
             finally: sys.argv=argv
         return original
+
     def apply(self,m,c):
         G=self.G; category=m['category']; owner=m.get('unit'); touched=[]
         if category in ('window_layer','ball_via','priority'):
@@ -1255,7 +1315,6 @@ class _RoutingLoop:
             pair_reason=self.pair_gate(p0,p1,c)
             if m['category'] in ('via','layer_name','window_layer','ball_via') and pair_reason and 'outside' in pair_reason:
                 raise ValueError(pair_reason)
-
             if m['category'] in ('part','priority') or pair_reason is not None:
                 if len(touched)>int(G['args'].get('loop_new_max','4' if self.large else '24')):
                     raise ValueError('too many units for a cheap rerouting move')
@@ -1315,6 +1374,7 @@ class _RoutingLoop:
         return ok
 
     def export(self,c,digest,quick=False):
+
         d=self.exchange/('%04d_%s'%(self.rounds,digest[:12]));d.mkdir(parents=True,exist_ok=True)
         G=self.G;b=c['bbox'];margin=.5;b=[b[0]-margin,b[1]-margin,b[2]+margin,b[3]+margin]
         scale=min(160,1000/max(b[2]-b[0],b[3]-b[1]));size=(max(1,int((b[2]-b[0])*scale)),max(1,int((b[3]-b[1])*scale)))
@@ -1471,7 +1531,6 @@ def local_search_mask(pairs, open_, radius):
         ks = [int(u[4:])] if u.startswith('GND#') else by_net.get(u, [])
         boxes = [D['pads'][k]['bbox'] for k in ks]
         if not boxes: continue
-
         region(min(b[0] for b in boxes), min(b[1] for b in boxes),
                max(b[2] for b in boxes), max(b[3] for b in boxes),
                6.1 + radius if u.startswith('GND#') else (WINDOW or 3.0) + radius)
@@ -1574,10 +1633,20 @@ def endgame(conf, pairs, level, seed, repair=False):
 
 
 
-MOVE = args.get('move', '0') == '1'
+_BGA_REST_REFS = {f['ref'] for f in D.get('fps', [])
+                  if BGA_REST and 'BGA' in (f.get('fp', '') + f.get('lib', '')).upper()}
+_BGA_REST_PADS = [p for p in D['pads'] if p['ref'] in _BGA_REST_REFS]
+_BGA_REST_FIELDS = []
+for _ref in sorted(_BGA_REST_REFS):
+    _ps = [p for p in _BGA_REST_PADS if p['ref'] == _ref]
+    if _ps:
+        _BGA_REST_FIELDS.append((min(p['bbox'][0] for p in _ps), min(p['bbox'][1] for p in _ps),
+                                 max(p['bbox'][2] for p in _ps), max(p['bbox'][3] for p in _ps)))
+_BGA_REST_ACTIVE = BGA_REST and bool(_BGA_REST_FIELDS)
+MOVE = args.get('move', '0') == '1' or _BGA_REST_ACTIVE
 MOVE_MAX = int(args.get('move_max', '80'))
-MOVE_SITES = int(args.get('move_sites', '10'))
-MOVE_GROUP = int(args.get('move_group', '25'))
+MOVE_SITES = int(args.get('move_sites', '32' if _BGA_REST_ACTIVE else '10'))
+MOVE_GROUP = int(args.get('move_group', '40' if _BGA_REST_ACTIVE else '25'))
 MOVE_SHARE = float(args.get('move_share', '0.25'))
 MOVE_ITER = int(args.get('move_iter', '10'))
 
@@ -1588,13 +1657,21 @@ MOVE_STRATEGY = (dict(R=2.0, series='core_set', warm=True), dict(R=3.5, series='
              dict(R=2.0, series='core_set', repair=True), dict(R=5.0, series='core_set'))
 MOVE_WARM_PF = float(args.get('move_warm_pf', '50'))
 _zs = dict(n=0, ok=0, cpu=0.0, work=0, quiet=0, best=None, log=None)
-
 MOVE_POLICY = json.load(open(args['move_policy']))['table'] if args.get('move_policy') else None
+
+
 def _move_pads2(x, y):
     return sum(1 for p in D['pads'] if abs(p['x'] - x) <= 2.0 and abs(p['y'] - y) <= 2.0)
 
+
 def _move_series(site):
-    if not MOVE_POLICY: return list(enumerate(MOVE_STRATEGY))
+    if not MOVE_POLICY:
+        result = list(enumerate(MOVE_STRATEGY))
+        if _BGA_REST_ACTIVE and args.get('move', '0') != '1':
+
+
+            result.insert(0, (len(MOVE_STRATEGY), dict(R=2.0, series='core_set', warm=True, repair=True, hard=True)))
+        return result
     k = len(site['core_set']); p = _move_pads2(site['x'], site['y'])
     layer_name = '%s|k%d|p%d' % (site['type_'], min(k, 3), 0 if p <= 8 else 1 if p <= 20 else 2)
     tab = MOVE_POLICY.get(layer_name) or MOVE_POLICY.get(site['type_']) or {}
@@ -1629,6 +1706,25 @@ def _move_sites(pairs, open_):
             seen.append((p['x'], p['y']))
             st.append(dict(type_='open_items', x=p['x'], y=p['y'], core_set={u}))
             if len(seen) >= 4: break
+    if _BGA_REST_ACTIVE and args.get('move', '0') != '1':
+
+
+
+        nearby = [s for s in st if any(a-3 <= s['x'] <= c+3 and b-3 <= s['y'] <= d+3
+                                    for a,b,c,d in _BGA_REST_FIELDS)]
+        far = [s for s in st if not any(a-3 <= s['x'] <= c+3 and b-3 <= s['y'] <= d+3
+                                         for a,b,c,d in _BGA_REST_FIELDS)]
+        st = nearby
+
+
+        for p in _BGA_REST_PADS:
+            u = 'GND#%d' % D['pads'].index(p) if p['net'] in AREA_NETS else p['net']
+            if u not in open_ or u in FIXED: continue
+            if any(u in s['core_set'] and math.hypot(p['x']-s['x'], p['y']-s['y']) <= 1.0 for s in st): continue
+            st.append(dict(type_='open_items', x=p['x'], y=p['y'], core_set={u}))
+
+
+        st += far
     return st
 
 
@@ -1645,8 +1741,6 @@ def _move_spacing(r, p):
 
 MOVE_LOCAL = args.get('move_local', '1') == '1'
 MOVE_CHK = args.get('move_chk', '0') == '1'
-
-
 _MOVE_BORDER = _DMAX + max(DRC_HOLE, VIA_DR / 2 + VIA_R + HOLE_CLR, VIA_DR / 2 + HOLE_CLR, VIA_DR / 2 + H2H) + VIA_R + 0.05
 
 
@@ -1718,7 +1812,8 @@ def move_attempt(site, strategy, seed):
     before, _ = _move_value(group, X)
     save = {w: copy.deepcopy(U[w]) for w in group if w in U}; fail_before = {w for w in group if w in fail}
     hsave = hist.copy(); PFs = PF[0]; soft = CONS_SOFT[0]; CONS_SOFT[0] = False; qf = SOURCE_FREE[0]
-    SOURCE_FREE[0] = bool(strategy.get('repair')) or qf; HARD_FOREIGN[0] = False
+    hf = HARD_FOREIGN[0]
+    SOURCE_FREE[0] = bool(strategy.get('repair')) or qf; HARD_FOREIGN[0] = bool(strategy.get('hard'))
     rng_ = budget_rng(5000 + seed)
     other = [w for w in group if w not in site['core_set']]
     if strategy.get('warm'):
@@ -1732,25 +1827,36 @@ def move_attempt(site, strategy, seed):
         hist[:] = 0; PF[0] = min(1.0, PFMAX) if PFMAX is not None else 1.0
         if strategy['series'] == 'core_set': order = core_set + sorted(other, key=lambda w: (grp(w)[0], rng_.rand()))
         else: order = sorted(group, key=lambda w: rng_.rand())
-    ok = {}; history = []
-    for w in pair_series(order): ok[w] = route_unit(w)
-    for _k in range(MOVE_ITER):
-        cfg = _move_conf(group, X); history.append(len(cfg))
-        if not cfg or time_tight(0.95): break
-        if len(history) >= 4 and min(history[-3:]) >= history[-4]: break
-        if strategy.get('warm') and len(history) >= 3 and min(history[-2:]) >= min(history[:-2]): break
-        for w, cells in cfg.items(): hist[np.array(cells, dtype=np.int64)] += 1.0
-        PF[0] *= 1.5
-        if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
-        for w in pair_series(sorted((w for w in group if w in cfg or not ok.get(w, True)), key=lambda w: rng_.rand())):
-            if not pair_unit(w): del_unit(w)
-            ok[w] = route_unit(w)
-    for w in group:
-        if ok.get(w, w in U): fail.discard(w)
-        else: fail.add(w)
-    post, _ = _move_value(group, X)
-    hist[:] = hsave; PF[0] = PFs; CONS_SOFT[0] = soft; SOURCE_FREE[0] = qf
+    ok = {}; history = []; aborted = False
+    _bga_budget_before = _BGA_REST_BUDGET[0]
+    _BGA_REST_BUDGET[0] = _BGA_REST_ACTIVE and args.get('move', '0') != '1'
+    try:
+        for w in pair_series(order): ok[w] = route_unit(w)
+        for _k in range(MOVE_ITER):
+            cfg = _move_conf(group, X); history.append(len(cfg))
+            if not cfg or time_tight(0.95): break
+            if len(history) >= 4 and min(history[-3:]) >= history[-4]: break
+            if strategy.get('warm') and len(history) >= 3 and min(history[-2:]) >= min(history[:-2]): break
+            for w, cells in cfg.items(): hist[np.array(cells, dtype=np.int64)] += 1.0
+            PF[0] *= 1.5
+            if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
+            for w in pair_series(sorted((w for w in group if w in cfg or not ok.get(w, True)), key=lambda w: rng_.rand())):
+                if not pair_unit(w): del_unit(w)
+                ok[w] = route_unit(w)
+        for w in group:
+            if ok.get(w, w in U): fail.discard(w)
+            else: fail.add(w)
+        post, _ = _move_value(group, X)
+    except _BgaRestBudget:
+
+
+        post = before; aborted = True
+    finally:
+        _BGA_REST_BUDGET[0] = _bga_budget_before
+        hist[:] = hsave; PF[0] = PFs; CONS_SOFT[0] = soft; SOURCE_FREE[0] = qf; HARD_FOREIGN[0] = hf
     taken = post < before
+    if _BGA_REST_ACTIVE and args.get('move', '0') != '1' and any(w in fail and w not in fail_before for w in group):
+        taken = False
     if not taken:
         for w in group:
             if w in U: del_unit(w)
@@ -1761,6 +1867,7 @@ def move_attempt(site, strategy, seed):
     cpu = time.process_time() - _tc; _zs['cpu'] += cpu
     if BUDGET_WORK: _zs['work'] += work_total() - _ta
     row.update(outcome='taken' if taken else 'rejected', before=before, after=post, history=history, cpu_s=round(cpu, 3))
+    if aborted: row['budget_abort'] = True
     _move_log(row)
     return taken
 
@@ -1829,6 +1936,13 @@ _AL = None
 if args.get('agent_loop') == '1':
     from codex.agent_loop.cur_state import AgentLoop
     _AL = AgentLoop(globals(), _AGENT_SAVED)
+
+
+FAIL_STILL = int(args.get('fail_still', '6' if NC is not None else '0')); _fs = [0, None]
+
+
+
+GOAL_FROM = int(args.get('goal_from', '0')); GOAL_HYSTERESIS = float(args.get('goal_hysteresis', '1.5' if NC is not None else '1.0')); _zg = [False]
 for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
     CONS_SOFT[0] = it <= int(args.get('cons_iter', '10'))
 
@@ -1857,7 +1971,9 @@ for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
     if not todo: break
     if time_tight():
         print('%s 80 %% used up: negotiation ends with %d conflicts' % (budget_message(), len(conf)), flush=True); break
-    if MOVE and it >= 8:
+
+
+    if MOVE and it >= 8 and not (_BGA_REST_ACTIVE and args.get('move', '0') != '1'):
         _zsum = len(conf) + len(fail)
         if _zs['best'] is None or _zsum < _zs['best']: _zs['best'] = _zsum; _zs['quiet'] = 0
         else: _zs['quiet'] += 1
@@ -1884,11 +2000,17 @@ for it in range(_AGENT_SAVED['round_no'] if _AGENT_SAVED else 2, MAXIT + 1):
             _es['level'] += 1; _es['ab'] = it + 3
     else:
         _es['n'] = 0; _es['before'] = None
+    if FAIL_STILL and not conf and fail:
+        _fs[0] = _fs[0] + 1 if fail == _fs[1] else 1; _fs[1] = set(fail)
+        if _fs[0] >= FAIL_STILL:
+            print('Negotiation ends: no conflicts, %d units unchanged without a route for %d passes' % (len(fail), _fs[0]), flush=True); break
+    else: _fs[0] = 0
     for u, b in conf.items(): hist[np.array(b, dtype=np.int64)] += HINC
     PF[0] *= float(args.get('pfmul', '1.5'))
     if PFMAX is not None: PF[0] = min(PF[0], PFMAX)
     fail_prev = fail; fail = set(); _next = set()
-    all_items = args.get('all_items', '1') == '1' and len(conf) > int(args.get('goal_from', '0'))
+    _zg[0] = len(conf) <= GOAL_FROM or (_zg[0] and len(conf) <= GOAL_FROM * GOAL_HYSTERESIS)
+    all_items = args.get('all_items', '1') == '1' and not _zg[0]
     close = ALL_CLOSE
     if CONVERGENCE_LOCAL:
         if len(conf) < _local_best[0]: _local_best[:] = [len(conf), 0]
@@ -1979,12 +2101,14 @@ if MOVE and _es['ran']:
 VIA_ANCHOR_ON[0] = False
 CONS_SOFT[0] = False
 
+
 _cf_checkpoint = exact_conflicts(); PAIRS_LAST = list(PAIRS)
 work_mark('before_post_run')
 negotiation_measure(it if 'it' in globals() else 1, _cf_checkpoint, 'before_post_run')
 if _ET and not _LEARN_ON: _ET.observe(_cf_checkpoint, it if 'it' in globals() else 1)
 json.dump(PAIRS_LAST, open(OUT.replace('.json', '_conflicts_before_widen.json'), 'w'))
 if ((BGA_PLAN and args.get('bga_budget', '0') == '1') or args.get('budget_before_post_run', '0') == '1' or globals().get('_EARLY_INFO') is not None) and time_tight() and (_cf_checkpoint or fail):
+
 
     _ct, _cv = export_geometry()
     _cc = {u:len(cs) for u,cs in _cf_checkpoint.items()}
@@ -2005,6 +2129,7 @@ def unit_len(u):
         return sum(math.dist(a, c) for t in r['tracks'] if not t.get('web') for a, c in zip(t['pts'][:-1], t['pts'][1:])) + 0.6 * n_sv(r)
     return sum(math.dist(a, c) for t in r['tracks'] for a, c in zip(t['pts'][:-1], t['pts'][1:])) + 0.6 * n_sv(r)
 def grp_key(u): return grp(u)[0]
+
 
 
 WT_KIND = None
@@ -2099,7 +2224,6 @@ if args.get('short') == '1' and not todo and not time_tight():
     if R19_SHORT: print('R19 shortening:', R19_SHORT_STAT, flush=True)
 
 
-
 SHORT_VIA = float(args.get('short_via', '8' if NC and 'start' not in args else '0'))
 if SHORT_VIA > 0 and NC is not None and not todo and not time_tight():
     t2 = time.time(); hist[:] = 0; PFs = PF[0]; PF[0] = 1e3; _CAND_IDX[0] = None; VIA_FACTOR[0] = SHORT_VIA
@@ -2130,6 +2254,9 @@ if SHORT_VIA > 0 and NC is not None and not todo and not time_tight():
         if not _n: break
     VIA_FACTOR[0] = 1.0; PF[0] = PFs
     print('Via round (via price x%g): %d vias saved, tracks %.1f mm longer for it (%.0fs)' % (SHORT_VIA, _saved, _more, time.time() - t2), flush=True)
+
+
+
 
 
 
@@ -2815,6 +2942,7 @@ if PAIR_NETS and not todo and not time_tight():
     print('Differential pairs (R29) coupled: %d' % pair_couple(), flush=True)
 if RET > 0 and not todo and not time_tight():
     _rvn = rv_post_run(); print('Return vias (Q2) after negotiation: %d added, %d superfluous removed' % _rvn, flush=True)
+
 if NC is not None and args.get('flow', '1') == '1':
     import os as _os
     sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -3143,8 +3271,6 @@ if PAD_CENTER:
     if _ns: print('Joints (R24): %d track ends set exactly on the centerline of their own track at the end' % _ns, flush=True)
     _net_copper = collinear_together() if args.get('collinear', '1') == '1' else 0
     print('Joints (R24): %d collinear support points merged; while routing (all passes)' % _net_copper, JOINT_STAT, flush=True)
-
-
 if args.get('via_fine_shift') == '1' and NC and not fail and not exact_conflicts() and not time_tight(): via_fine_shift()
 LENGTHS_REPORT = None
 if (args.get('length_list', '0') == '1' and SI_FIELDS or PAIR_NETS) and (PAIR_SEARCH_SPACE or not fail and not exact_conflicts()) and not time_tight(0.95):
@@ -3171,6 +3297,7 @@ if args.get('remaining_conflicts', '0') == '1':
     print('R45: %d via moves accepted, %.2f CPU-s' % (REST_REPORT['accepted'], REST_REPORT['cpu_s']), flush=True)
 
 
+
 def pin_access_rule_values(net):
     from analysis.coupling import coupling, sets
     from analysis.topology import topology
@@ -3190,9 +3317,9 @@ def pin_access_rule_values(net):
     return dict(coupling=k, **{key:t[key] for key in keys},
                 star_free=t['star']-t['star_pad'], sharp_free=t['sharp']-t['sharp_pad'])
 
-
 def pin_access_rule_assumption(before, post):
     return all(math.isfinite(post[k]) and post[k] <= v + 1e-6 for k,v in before.items())
+
 
 def pin_access_post_run():
     global _LOOP_DEADLINE
@@ -3212,7 +3339,6 @@ def pin_access_post_run():
     try:
         hist[:] = 0; PF[0] = 1e3; HARD_FOREIGN[0] = True
         _PZ_BUDGET_ACTIVE[0] = True; _LOOP_DEADLINE = deadline
-
         removed = []
         if PZ_REST:
             _loop_cpu_check()
@@ -3396,6 +3522,8 @@ if UNDER:
         ', narrowest %.3f instead of %.3f mm (%s)' % min((e['width'] - e['nominal'], e['width'], e['nominal'], e['net_name']) for e in _uf)[1:] if _uf else '',
         len(UNDER) - len(_uf)), flush=True)
 if UNREACHABLE: print('Unreachable (hard obstacles, pad has no exit):', {n: v for n, v in sorted(UNREACHABLE.items())})
+if ROOT_STAT['swapped']: print('Enclosed root (E126): %d nets with new root' % ROOT_STAT['swapped'], flush=True)
+if ZGROUPS: print('Zone groups (E126): %d pads attached over the original zone, %d deferred once' % (ZG_STAT['vacant'], ZG_STAT['later']), flush=True)
 
 MPV = []
 for _e in EPG:
@@ -3440,6 +3568,7 @@ _rest_final = export_data(tracks, vias, conf, raw_data=True,
     **({'pair_search_space_info': _PAIR_SEARCH_INFO} if PAIR_SEARCH_SPACE else {}),
     **({'final': 'early_abort' if _EARLY_INFO is not None else ('cpu_budget' if time_tight() else 'finished'),
         'learning_state': json.loads(_LEARN_SNAPSHOT)['learning_state'], 'learning_budget':json.loads(_LEARN_SNAPSHOT)['learning_budget']} if _LEARN_ON else {}))
+
 if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1' and REST_REPORT and NC and args.get('netclasses'):
     import tempfile
     from postprocessing.remaining_conflicts import parts_post_run, repair_keepout
@@ -3452,7 +3581,6 @@ if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1'
             _rp.write_text(json.dumps(_rest_final)); _bp.write_text(Path(sys.argv[1]).read_text())
             _rest_block = repair_keepout(globals().get('ST') or {})
             if _rest_block:
-
                 _rest_budget = 0
             _rp.with_name('routes_conflicts.json').write_text(json.dumps(PAIRS))
             _rest_parts = parts_post_run(str(_bp), args['netclasses'], str(_rp), _rest_budget)
@@ -3465,7 +3593,6 @@ if args.get('remaining_conflicts') == '1' and args.get('rest_parts', '1') == '1'
 _safe = rest_final(_rest_final)
 if args.get('skew', '0') == '1':
     _safe = skew_match(D, _safe, args, Path(OUT).with_suffix('.skew'))
-
 work_emergency_stop()
 if WORK_MEASURE:
     work_mark('finished')

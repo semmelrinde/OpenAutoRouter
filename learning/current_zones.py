@@ -4,7 +4,7 @@ from pathlib import Path
 import shapely
 from shapely.errors import GEOSException
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import polylabel, unary_union
 
 CURRENT_KINDS = ('current_val', 'supply', 'sw')
 QS = 32
@@ -159,6 +159,7 @@ def tangential_rounds(g, core_set, vacant, radius=.4):
     return g.difference(remove).union(add).buffer(0)
 
 
+SMALL_WITHOUT_ZONE = True
 I_ZONE = 0.2
 
 
@@ -170,9 +171,11 @@ def _current_known(v):
 
 def current_nets(K, gnd, i_zone=I_ZONE):
     N = K.get('net_list') or {}
-    return sorted((n for n, v in N.items() if n not in gnd and
-                   (v.get('category') in CURRENT_KINDS or (_current_known(v) or 0.0) >= i_zone)),
-                  key=lambda n: (-net_current(K, n), n))
+    def zone(v):
+        i = _current_known(v)
+        if i is not None and SMALL_WITHOUT_ZONE: return i > i_zone - .001
+        return v.get('category') in CURRENT_KINDS or (i or 0.0) >= i_zone
+    return sorted((n for n, v in N.items() if n not in gnd and zone(v)), key=lambda n: (-net_current(K, n), n))
 
 
 def measurement_branches(B, R, K, L, n):
@@ -217,6 +220,8 @@ def measurement_branches(B, R, K, L, n):
         np.maximum.at(node_current,grid.a,np.nan_to_num(np.abs(state['current'])))
         np.maximum.at(node_current,grid.b,np.nan_to_num(np.abs(state['current'])))
     except ModelError:
+
+
         tree=None;protected=set();protected_share=0.
     contacts=unary_union([Polygon(q) for p in ps for q in p['polys'].get(L,[])])
     shapely.prepare(contacts)
@@ -309,6 +314,8 @@ def _segment_hulls(B, RR, L, n, grow):
 
 
 _RICHT = [(math.cos(math.radians(45 * k)), math.sin(math.radians(45 * k))) for k in range(8)]
+
+
 def _octagon(g, border=0.0):
     import numpy as np
     pts = np.asarray(g.convex_hull.exterior.coords if g.convex_hull.geom_type == 'Polygon' else g.convex_hull.coords)
@@ -372,6 +379,7 @@ def _open(g, r):
 
 PROTECTION = ('link_chain', 'tap', 'kelvin', 'sig')
 
+
 def track_protection_on(R):
     o = R.get('options') or {}
     return str(o.get('track_protection', '0')).lower() in ('1', 'true') or str(o.get('r39', '0')) == '1'
@@ -384,7 +392,6 @@ def _track_protection(R, L, n):
     copper = unary_union([track_geometry(t) for t in tracks])
     clearance = float(R.get('clr') or (R.get('options') or {}).get('clr') or .1)
     return copper, copper.buffer(clearance + .005, QS)
-
 
 def _zones_copper(R, n, L):
     return unary_union([_geo(q) for q in R.get('zone_list', []) if q['net'] == n and q['layer'] == L] +
@@ -429,14 +436,39 @@ def skeleton(R):
     return float(w) if w else None
 
 
+
+
+
+CONTOUR = None
+SELFPLAY_CONTOUR = 0.25
+
+
+def _contour_eps(R):
+    v = (R.get('options') or {}).get('r36_contour', R.get('r36_contour', CONTOUR)) if isinstance(R, dict) else CONTOUR
+    try: return float(v) if v not in (None, '', '0', 0) else None
+    except (TypeError, ValueError): return None
+
+
 def zone_list(B, R, K, gnd_layers=None, clr=None, border=0.25, r_smoothed=0.6, r_free=0.2, r_open=0.2, group=None, min_area=0.05,
-          min_track=1.0, priority=None, measurement_branch=True, compact=True, shaping=None, zones_judge=None):
+          min_track=1.0, priority=None, measurement_branch=True, compact=True, shaping=None, zones_judge=None, contour=None, contour_bay=0.8):
     from learning.zones_judge_selection import an, choose
     if an(R, zones_judge):
         return choose(B, R, K, gnd_layers, clr=clr, border=border, r_smoothed=r_smoothed, r_free=r_free,
             r_open=r_open, group=group, min_area=min_area, min_track=min_track,
             priority=priority, measurement_branch=measurement_branch, compact=compact, shaping=shaping)
     shaping = shaping or (R.get('r36_shape') or 'topo')
+    contour = contour if contour is not None else _contour_eps(R)
+    if contour:
+        from learning.zones_contour import simplify
+        zs = zone_list(B, R, K, gnd_layers, clr=clr, border=border, r_smoothed=r_smoothed, r_free=r_free, r_open=r_open, group=group,
+                   min_area=min_area, min_track=min_track, priority=priority, measurement_branch=measurement_branch, compact=compact,
+                   shaping=shaping, contour=0)
+        try:
+            return simplify(B, R, K, zs, gnd_layers, clr=clr, border=border, eps=float(contour), measurement_branch=measurement_branch,
+                                bay=float(contour_bay or 0))
+        except GEOSException as e:
+            print('R36 outline: GEOS error, zones without outline:', e, file=sys.stderr)
+            return zs
     from analysis.switch_node import an as _sw_on
     if _sw_on(R) and shaping != 'topo':
         raise ValueError("sw_compact=1 is only implemented for shaping='topo'")
@@ -447,8 +479,6 @@ def zone_list(B, R, K, gnd_layers=None, clr=None, border=0.25, r_smoothed=0.6, r
     if str((R.get('options') or {}).get('r39', '0')) == '1' and shaping != 'straight':
         raise ValueError("r39=1 is only implemented for shaping='straight' (r36_shape='straight')")
     if shaping == 'topo':
-
-
 
         from learning.current_zones_topo import zone_list as zones_topo
         zones = zones_topo(B, R, K, gnd_layers, clr=clr, border=border, kappa=1.0, skeleton=skeleton(R),
@@ -512,7 +542,6 @@ def zone_list(B, R, K, gnd_layers=None, clr=None, border=0.25, r_smoothed=0.6, r
                 grp = 4.0 if group is None else group
 
 
-
             pieces_e = [s for s in getattr(seed, 'geoms', [seed]) if not s.is_empty]
             hulls = [] if compact else [s.convex_hull.intersection(s.buffer(rich, QS)) for s in pieces_e]
             if shaping == 'straight' and compact:
@@ -553,6 +582,7 @@ def zone_list(B, R, K, gnd_layers=None, clr=None, border=0.25, r_smoothed=0.6, r
 
 
 
+
             safe = free_pad.union(owned)
             g = g.buffer(.02, QS).intersection(safe).simplify(.0005, preserve_topology=True)
             g = _open(_close(g,.01),.01).intersection(safe)
@@ -564,7 +594,6 @@ def zone_list(B, R, K, gnd_layers=None, clr=None, border=0.25, r_smoothed=0.6, r
                 g=g.difference(moat).union(sense.intersection(free_pad)).union(owned)
                 g=tangential_rounds(g.simplify(.0005,preserve_topology=True).union(owned),owned,free_pad)
             if corridor:
-
 
 
                 hem = max(.75, float((K.get('net_list',{}).get(n) or {}).get('w') or .3)/2)
@@ -599,7 +628,6 @@ def r39_corridor(B, R, K, L, n, g, owned, vacant, measurement_branch=True):
     allowed = vacant
     chains, moat = _track_protection(R, L, n)
     if not chains.is_empty:
-
         allowed = allowed.difference(moat)
     if measurement_branch:
         _, moat = measurement_branches(B, R, K, L, n)
@@ -613,11 +641,9 @@ def r39_corridor(B, R, K, L, n, g, owned, vacant, measurement_branch=True):
     safe_add = [p for p in getattr(add, 'geoms', [add])
                 if sum(p.intersects(q) for q in original) <= 1]
     return g.union(unary_union(safe_add)).buffer(0)
-
 def fast_nets(K, from_rank=3):
     return {n for n, k in sorted((K.get('net_list') or {}).items())
             if k.get('category') == 'sw' or (k.get('category') == 'fast' and (k.get('rank') or 0) >= from_rank)}
-
 def _geo_grow(seed, M, k):
     from scipy import ndimage
     s4, s8 = ndimage.generate_binary_structure(2, 1), ndimage.generate_binary_structure(2, 2)
@@ -629,7 +655,14 @@ def _geo_grow(seed, M, k):
     return x
 
 
-def ends_stitch(s, close, anchor, allowed, inner, keepout_vias, d_via, clr, r=1.5, r_cut=2.0, h=0.1, min_cells=4, max_new=None):
+
+
+STITCH_MIN_GAIN = 0.15
+STITCH_R_TOL = 1.25
+
+
+def ends_stitch(s, close, anchor, allowed, inner, keepout_vias, d_via, clr, r=1.5, r_cut=2.0, h=0.1, min_cells=4, max_new=None,
+                  min_gain=STITCH_MIN_GAIN, r_tol=STITCH_R_TOL):
     import numpy as np
     from scipy.signal import fftconvolve
     x0, y0, x1, y1 = s.bounds
@@ -643,10 +676,10 @@ def ends_stitch(s, close, anchor, allowed, inner, keepout_vias, d_via, clr, r=1.
     OK = M & shapely.contains_xy(inner, X, Y) & shapely.contains_xy(allowed, X, Y)
     k, k2 = int(math.ceil(r / h)), int(math.ceil((r_cut or r) / h)); ks = int(math.ceil((d_via + clr) / h))
     yy, xx = np.mgrid[-k:k + 1, -k:k + 1]; disc = ((xx * xx + yy * yy) * h * h <= r * r).astype(np.float32)
-
     def window(ax, ay, kk):
         cx, cy = int(round((ax - x0) / h)), int(round((ay - y0) / h))
         return slice(max(0, cy - kk - 1), max(0, min(ny, cy + kk + 2))), slice(max(0, cx - kk - 1), max(0, min(nx, cx + kk + 2)))
+
     def cover(ax, ay, probe=False):
         n = 0
         for UU, rr, kk in ((U, r, k), (U2, r_cut, k2)) if U2 is not None else ((U, r, k),):
@@ -666,7 +699,18 @@ def ends_stitch(s, close, anchor, allowed, inner, keepout_vias, d_via, clr, r=1.
         if a.start < a.stop and b.start < b.stop:
             OK[a, b] &= ~(((X[a, b] - ax) ** 2 + (Y[a, b] - ay) ** 2) < (d_via + clr) ** 2)
 
-    for ax, ay in anchor: cover(ax, ay)
+
+
+    Uf = U.copy() if min_gain > 0 else None
+    kf = int(math.ceil(r_tol * r / h))
+
+    def far_way(ax, ay):
+        if Uf is None: return
+        a, b = window(ax, ay, kf)
+        if a.start < a.stop and b.start < b.stop:
+            Uf[a, b] &= ~(((X[a, b] - ax) ** 2 + (Y[a, b] - ay) ** 2) <= (r_tol * r) ** 2)
+
+    for ax, ay in anchor: cover(ax, ay); far_way(ax, ay)
     for ax, ay in keepout_vias:
         if x0 - 1 <= ax <= x1 + 1 and y0 - 1 <= ay <= y1 + 1: keepout_list(ax, ay)
     new = []
@@ -678,10 +722,11 @@ def ends_stitch(s, close, anchor, allowed, inner, keepout_vias, d_via, clr, r=1.
         G = np.where(OK[a, b], np.rint(G), 0)
         j = int(np.argmax(G))
         if G.flat[j] < min_cells: break
+        if Uf is not None and G.flat[j] < min_gain * disc.sum() and int(Uf.sum()) < min_cells: break
         cy, cx = divmod(j, G.shape[1]); cy += a.start; cx += b.start
         vx, vy = float(X[cy, cx]), float(Y[cy, cx])
         if cover(vx, vy, probe=True) < min_cells: OK[cy, cx] = False; continue
-        cover(vx, vy); keepout_list(vx, vy); new.append((round(vx, 4), round(vy, 4)))
+        cover(vx, vy); keepout_list(vx, vy); far_way(vx, vy); new.append((round(vx, 4), round(vy, 4)))
     if U2 is None or not U2.any(): return new, None
     iy, ix = np.nonzero(U2)
     e = h * 0.55
@@ -715,7 +760,6 @@ def open_pocket(s, open_items, anchor, d_via, w_max=2.0, r_end=0.8):
                 if t.area > 4 * o.area + 2.0: t = None
         if t is not None and not t.is_empty and t.area >= 0.1: way.append(t)
     return unary_union(way) if way else None
-
 
 GND_GRID = 1e-6
 
@@ -771,8 +815,36 @@ def _gnd_buffer(a, logbook, *args, **kwargs):
     return result
 
 
+def _pockets_on_zones(B, R, L, rejected, gnd_pieces, hole_list, clr, contour, gnd, r_min=0.15):
+    zs = [z for z in R.get('zone_list', []) if z.get('source') == 'current_zones' and z['layer'] == L and z.get('polys')]
+    if not zs: return 0
+    part_list = _parts(B, dict(R, zone_list=[q for q in R.get('zone_list', []) if q.get('source') != 'current_zones']), L)
+    hole = float((R.get('options') or {}).get('h2h') or .2)
+    n_new = 0
+    for s in rejected:
+        close = [(z, _geo(z)) for z in zs]
+        close = [(z, g) for z, g in close if g.distance(s) < clr + .05]
+        if not close: continue
+        z, g = max(close, key=lambda zg: (zg[1].buffer(clr + .05).intersection(s).area, zg[0]['net']))
+        n = z['net']
+        foreign = unary_union([q for m, q in part_list if m != n] + [_geo(q) for q in zs if q['net'] != n] + list(gnd_pieces))
+        vacant = contour.difference(foreign.buffer(clr + .003, QS)).difference(keepout_area(B, L, 'areas'))
+        vacant = vacant.difference(unary_union([h.buffer(hole + .003, QS) for h in hole_list])).buffer(-.002, 8)
+        to_it = s.buffer(clr + .05, QS).intersection(vacant)
+        to_it = to_it.buffer(-r_min, QS).buffer(r_min, QS).intersection(vacant)
+        new = unary_union([g, to_it]).buffer(0)
+
+        new = unary_union([new, new.buffer(2 * r_min, QS).buffer(-2 * r_min, QS).intersection(vacant)]).buffer(0)
+        new = unary_union([g, new.buffer(-.08, QS).buffer(.08, QS).intersection(new)]).buffer(0)
+        new = unary_union([p for p in getattr(new, 'geoms', [new]) if p.geom_type == 'Polygon' and p.intersects(g)])
+        if new.area < g.area + .05: continue
+        z.update(polys=_polys(new), area_mm2=round(new.area, 2), k16_pockets=z.get('k16_pockets', 0) + 1); n_new += 1
+    return n_new
+
+
 def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_width=0.25, min_area=0.3,
-                 r41=True, r41_r=1.5, r41_cut=2.0, r41_close=1.0, r41_bands=2.0, k3=True, k3_r=3.0, k2_round=2.0, geos_logbook=None):
+                 r41=True, r41_r=1.5, r41_cut=2.0, r41_close=1.0, r41_bands=2.0, k3=True, k3_r=3.0, k2_round=2.0, geos_logbook=None,
+                 via_search=True, pockets=True):
     geos_log = geos_logbook if geos_logbook is not None else []
     gnd = set(K.get('gnd') or ['GND']); gn = sorted(gnd)[0]; gl = set(_gnd_layers(R, gnd_layers))
     clr = clr if clr is not None else max(0.15, float(R.get('clr') or (R.get('options') or {}).get('clr') or 0.1))
@@ -780,7 +852,15 @@ def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_wi
     contour = _gnd_buffer(unary_union([_gnd_buffer(Polygon(o), geos_log, 0) for o in B['outline'] if len(o) >= 3]), geos_log, -border, QS)
     cu_layers = [L for L in _layers(B) if L not in gl]
     hole_list = [_gnd_buffer(Point(v['x'], v['y']), geos_log, b_via / 2, QS) for v in R.get('vias', []) if v.get('net') not in gnd]
-    hole_list += [_gnd_buffer(Point(p['x'], p['y']), geos_log, p['drill'] / 2, QS) for p in B['pads'] if p.get('drill') and p['net'] not in gnd]
+
+    import numpy as np
+    from common.drills import pad_drill_hole
+    def pad_hole(p):
+        try:
+            with np.errstate(divide='ignore', invalid='ignore'): h = pad_drill_hole(p)
+        except ValueError: h = None
+        return h['geo'] if h is not None else _gnd_buffer(Point(p['x'], p['y']), geos_log, p['drill'] / 2, QS)
+    hole_list += [pad_hole(p) for p in B['pads'] if p.get('drill') and p['net'] not in gnd]
     foreign_l, owned_l, free_l = {}, {}, {}
     for L in cu_layers:
         t = _parts(B, R, L)
@@ -803,12 +883,12 @@ def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_wi
         c = _gnd_buffer(Point(x, y), geos_log, d_via / 2 + clr, QS)
         drill = _gnd_buffer(Point(x,y), geos_log, b_via/2 + hole, QS)
         return _gnd_buffer(contour, geos_log, -d_via / 2).contains(Point(x, y)) and not c.intersects(all_items) and \
-            (via_mask_keepout.is_empty or not Point(x,y).buffer(d_via/2, QS).intersects(via_mask_keepout)) and not drill.intersects(bore_foreign) and not c.intersects(via_keepout) and \
+            (via_mask_keepout.is_empty or not Point(x,y).buffer(d_via/2, QS).intersects(via_mask_keepout)) and not drill.intersects(bore_all) and not c.intersects(via_keepout) and \
             all(Point(v['x'], v['y']).distance(Point(x, y)) >= d_via + clr for v in R.get('vias', []) + vias)
     SCH = fast_nets(K) if r41 else set()
     gnd_anchor = [(v['x'], v['y']) for v in R.get('vias', []) if v.get('net') in gnd] + \
                 [(p['x'], p['y']) for p in B['pads'] if p.get('drill') and p['net'] in gnd]
-    bore_all = unary_union([_gnd_buffer(Point(p['x'], p['y']), geos_log, p['drill'] / 2, QS) for p in B['pads'] if p.get('drill')] + [bore_foreign])
+    bore_all = unary_union([pad_hole(p) for p in B['pads'] if p.get('drill')] + [bore_foreign])
     allowed = None
 
     def allowed_fetch():
@@ -818,15 +898,15 @@ def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_wi
             if not via_keepout.is_empty: verb.append(_gnd_buffer(via_keepout, geos_log, d_via / 2 + clr, QS))
             allowed = _gnd_difference(_gnd_buffer(contour, geos_log, -d_via / 2, QS), geos_log, unary_union(verb))
         return allowed
-    zones_out = []
+    zones_out = []; pockets_jobs = []
     for L in cu_layers:
         pieces = [s for s in getattr(free_l[L], 'geoms', [free_l[L]]) if s.geom_type == 'Polygon' and s.area >= min_area]
-        keep = []
+        keep = []; rejected = []
         for s in sorted(pieces, key=lambda s: -s.area):
             if not owned_l[L].is_empty and s.intersects(owned_l[L]): keep.append(s); continue
             if any(s.contains(Point(v['x'], v['y'])) for v in vias): keep.append(s); continue
             inner = _gnd_buffer(s, geos_log, -(d_via / 2 + 0.05), QS)
-            if inner.is_empty: continue
+            if inner.is_empty: rejected.append(s); continue
             x0, y0, x1, y1 = inner.bounds; assigned = False
             ys = [y0 + (y1 - y0) / 2] if y1 - y0 < raster else [y0 + raster / 2 + i * raster for i in range(int((y1 - y0) / raster) + 1)]
             xs = [x0 + (x1 - x0) / 2] if x1 - x0 < raster else [x0 + raster / 2 + i * raster for i in range(int((x1 - x0) / raster) + 1)]
@@ -837,7 +917,20 @@ def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_wi
             if not assigned:
                 p = inner.representative_point()
                 if via_ok(p.x, p.y): vias.append(dict(x=round(p.x, 4), y=round(p.y, 4), net=gn, source='gnd_fill')); assigned = True
+            if not assigned and via_search:
+
+
+                free_v = inner.intersection(allowed_fetch())
+                occupied = [Point(v['x'], v['y']).buffer(d_via + clr + .002, QS) for v in R.get('vias', []) + vias
+                          if inner.distance(Point(v['x'], v['y'])) < d_via + clr + .01]
+                if occupied and not free_v.is_empty: free_v = free_v.difference(unary_union(occupied))
+                for t in sorted(getattr(free_v, 'geoms', [free_v]), key=lambda t: -t.area):
+                    if t.is_empty or t.geom_type != 'Polygon': continue
+                    p = polylabel(t, 0.005) if t.area > 1e-6 else t.representative_point()
+                    if via_ok(p.x, p.y):
+                        vias.append(dict(x=round(p.x, 4), y=round(p.y, 4), net=gn, source='gnd_fill')); assigned = True; break
             if assigned: keep.append(s)
+            else: rejected.append(s)
         r41_info = None
         if r41 and SCH and keep:
             fast = unary_union([g for m, g in _parts(B, R, L) if m in SCH])
@@ -889,12 +982,18 @@ def gnd_fill(B, R, K, gnd_layers=None, clr=None, border=0.25, raster=2.0, min_wi
                     nv += ends_stitch(s, s, anchor + nv, permitted, inner_s, occupied + nv, d_via, clr, k2_round, None, max_new=1)[0]
                 nv = [p for p in nv if via_ok(*p)]
                 vias += [dict(x=x, y=y, net=gn, source='gnd_fill', k3=1) for x, y in nv]; k3_n += len(nv)
+        if pockets and rejected: pockets_jobs.append((L, rejected, list(keep)))
         if keep:
             g = unary_union(keep).simplify(0.00002, preserve_topology=True)
             z = dict(net=gn, layer=L, source='gnd_fill', polys=_polys(g), area_mm2=round(g.area, 2), prio=-1)
             if r41_info: z['r41'] = dict(vias=r41_info['vias'], cut_mm2=round(r41_info['cut_mm2'], 2))
             if k3: z['k3_vias'] = k3_n
             zones_out.append(z)
+
+
+    new_vias = [_gnd_buffer(Point(v['x'], v['y']), geos_log, d_via / 2, QS) for v in vias]
+    for L, rejected, keep in pockets_jobs:
+        _pockets_on_zones(B, R, L, rejected, keep + new_vias, hole_list, clr, contour, gnd)
     return zones_out, vias
 
 
@@ -910,8 +1009,6 @@ def _suggestion(rj, R):
     if V.get('tracks') != R.get('tracks') or basis(V.get('vias', [])) != basis(R.get('vias', [])): return None
     if not any(z.get('source') == 'current_zones' for z in V.get('zone_list', [])): return None
     return V
-
-
 def _routing_verify(B, R, K, gnd_layers=None):
     from analysis.evaluation import not_connected, gnd_areas, native_areas
     from analysis.corpus import normalized_route
@@ -955,6 +1052,10 @@ def _geometric(bj, kj, rj, gnd_layers=None, off=None, gnd=True, cpu_s=720):
                       log=str(Path(folder)/'worker.log'), env=dict(os.environ, PYTHONHASHSEED='0'))
         info = json.loads(result.read_text()) if run['cur_state'] == 'ok' and result.exists() else dict(
             applied=False, reason='R36 geometry: ' + run['cur_state'])
+        if run['cur_state'] != 'ok':
+            try: info['log_end'] = [z for z in (Path(folder)/'worker.log').read_text(errors='replace').splitlines()
+                                     if 'Warning' not in z and 'return lib' not in z][-12:]
+            except OSError: pass
         info['compute_slot'] = run
         if info.get('applied'):
             if not candidate.exists():
@@ -968,6 +1069,23 @@ def _geometric(bj, kj, rj, gnd_layers=None, off=None, gnd=True, cpu_s=720):
             finally:
                 if os.path.exists(tmp): os.unlink(tmp)
         return info
+
+def shape_measure(zs):
+    long = l45 = 0.0; corners = []
+    for z in zs:
+        g = _geo(z)
+        for p in getattr(g, 'geoms', [g]):
+            if p.geom_type != 'Polygon' or p.area < 0.05: continue
+            q = list(p.exterior.simplify(0.1).coords)
+            corners.append(len(q) - 1)
+            for a, b in zip(q[:-1], q[1:]):
+                l = math.dist(a, b); long += l
+                w = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 45
+                if min(w, 45 - w) < 1.0: l45 += l
+    corners.sort()
+    return dict(edges45_pct=round(100 * l45 / long, 1) if long else None, corners_median=corners[len(corners) // 2] if corners else None,
+                pieces=len(corners))
+
 
 def _geometric_internal(bj, kj, rj, gnd_layers=None, off=None, gnd=True, _k17_proposal=False):
     B, K, R = [json.loads(Path(p).read_text()) for p in (bj,kj,rj)]
@@ -991,12 +1109,14 @@ def _geometric_internal(bj, kj, rj, gnd_layers=None, off=None, gnd=True, _k17_pr
                     gnd_zones=len(gz), gnd_area_mm2=round(sum(z.get('area_mm2', 0) for z in gz), 1))
         json.dump(R, open(off or rj, 'w'))
         return info
-    zs = zone_list(B, R, K, gnd_layers)
+    explicit = 'r36_contour' in R or 'r36_contour' in (R.get('options') or {})
+    zs = zone_list(B, R, K, gnd_layers, contour=None if explicit else SELFPLAY_CONTOUR)
     from learning.current_zones_topo import skeleton_apply
     n_skeleton = skeleton_apply(R, zs); R['zone_list'] += zs
     info = dict(applied=True, input_check=input_, current_zones=len(zs), net_list=sorted({z['net'] for z in zs}),
                 **({'skeleton_tracks': n_skeleton} if n_skeleton else {}),
-                area_mm2=round(sum(z['area_mm2'] for z in zs), 1), owned_mm2=round(sum(z['owned_mm2'] for z in zs), 1))
+                area_mm2=round(sum(z['area_mm2'] for z in zs), 1), owned_mm2=round(sum(z['owned_mm2'] for z in zs), 1),
+                shaping=shape_measure(zs))
     if gnd:
         gz, gv = gnd_fill(B, R, K, gnd_layers); R['zone_list'] += gz; R['vias'] += gv
         info.update(gnd_zones=len(gz), gnd_vias=len(gv), gnd_area_mm2=round(sum(z['area_mm2'] for z in gz), 1))

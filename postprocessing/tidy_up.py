@@ -246,7 +246,7 @@ def main():
                    net_list=net_list, pads=H.get('pads'), net_ties=H.get('net_ties'))
     dru = o.get('dru') or (os.path.splitext(o['pcb'])[0] + '.kicad_dru' if o.get('pcb') else None)
     fwd = Obstacles(H, drc=float(o.get('drc', 0.09)), drcpad=float(o.get('drcpad', 0.10)), drcbga=float(o.get('drcbga', o.get('drcpad', 0.10))),
-                      hole_size=float(o.get('hole_size', 0.25)), edge=float(o.get('edge', 0.2)), net_spacing=net_spacings(dru, net_list))
+                      hole_size=float(o.get('hole_size', 0.25)), edge_clr=float(o.get('edge_clr', 0.2)), net_spacing=net_spacings(dru, net_list))
     R = tidy_up(H, keepout_list=S, net_list=[n for n in o['net_list'].split(';') if n] if o.get('net_list') else None, fwd=fwd,
                    micro=float(o.get('micro', 0.03)), fix=json.load(open(o['fix'])) if o.get('fix') else ())
     json.dump(R, open(a[1], 'w'))

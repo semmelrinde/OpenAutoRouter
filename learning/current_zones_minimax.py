@@ -32,6 +32,7 @@ def segment_currents(B, R, K, n):
 def via_fields(B, R, RR, K, zones_out, net_list, currents, clr, contour, hole, per_ampere=4.0, n_max=40, r_field=2.5):
     d_via, b_via = SZ._via_ground(R); part = d_via + clr + .02; new = []
     cu_layers = SZ._layers(B); protection_on = SZ.track_protection_on(R)
+    keepout = unary_union([SZ.keepout_area(B, L, 'vias').union(SZ.keepout_area(B, L, 'areas')) for L in cu_layers])
     for n in net_list:
         seg_s, I = currents[n]
         if I < 0.25: continue
@@ -45,6 +46,8 @@ def via_fields(B, R, RR, K, zones_out, net_list, currents, clr, contour, hole, p
         allowed = contour.buffer(-d_via / 2, 16).difference(foreign.buffer(d_via / 2 + clr + .003, 16)).difference(bore.buffer(b_via / 2 + hole + .003, 16))
         mask_keepout = unary_union([SZ.mask_clearance(B, n, L, clr, 16) for L in cu_layers])
         if not mask_keepout.is_empty: allowed = allowed.difference(mask_keepout.buffer(d_via / 2, 16))
+
+        if not keepout.is_empty: allowed = allowed.difference(keepout.buffer(d_via / 2 + clr, 16))
         if protection_on:
             protection = unary_union([SZ._track_protection(RR, L, n)[1] for L in cu_layers])
             if not protection.is_empty: allowed = allowed.difference(protection.buffer(d_via / 2, 16))

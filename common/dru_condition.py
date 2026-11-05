@@ -101,3 +101,10 @@ def min_width(rules, net, netclass, cu_layers, net_list, reason=0.0):
             elif v is None: caution = max(caution, float(c['min'])); names.add(r['name'])
         out[layer_name] = max(reason, w or 0.0, caution)
     return out, sorted(names)
+
+
+def tasks_dru(design_rules_path, rg):
+    from pathlib import Path
+    if not design_rules_path or (rg or {}).get('source') != 'learning/tasks.py': return None
+    p = Path(design_rules_path).with_name('board.kicad_dru')
+    return p if p.is_file() else None

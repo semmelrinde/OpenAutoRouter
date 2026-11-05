@@ -414,6 +414,12 @@ def load(argv):
     kw = dict(a.split('=', 1) for a in argv[3:] if '=' in a)
     RG = json.load(open(kw['design_rules'])) if 'design_rules' in kw else None
     CONS = json.load(open(kw['specs'])) if 'specs' in kw and os.path.exists(kw['specs']) else {}
+    from common.dru_condition import tasks_dru
+    dq = tasks_dru(kw.get('design_rules'), RG)
+    if dq is not None and not RG.get('spacings'):
+        from analysis.spacings import contract_spec
+        from analysis.design_rules import dru_rules
+        RG = dict(RG, spacings=contract_spec(B, RG, dru=dru_rules(str(dq))))
     return B, RG, CONS, kw
 
 

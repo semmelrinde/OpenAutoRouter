@@ -122,7 +122,7 @@ def geo_hash(H, nets):
 
 class Obstacles:
 
-    def __init__(self, H, drc=0.09, drcpad=0.10, drcbga=None, drcvia=None, hole_size=0.25, edge=0.2, net_spacing=None, reserve=0.002,
+    def __init__(self, H, drc=0.09, drcpad=0.10, drcbga=None, drcvia=None, hole_size=0.25, edge_clr=0.2, net_spacing=None, reserve=0.002,
                  areas=None):
         self.net_spacing = net_spacing or {}; self.res = reserve; self.drc = drc
         drcbga = drcpad if drcbga is None else drcbga; drcvia = drc if drcvia is None else drcvia
@@ -147,7 +147,7 @@ class Obstacles:
                 for L in k.get('layers', []): self.obj[L].append(('#KEEPOUT', Polygon(k['poly']).buffer(0), 0.0, False))
         for e in H.get('edges', []):
             g = LineString(list(e) + [e[0]]) if len(e) > 2 else LineString(e)
-            for L in cu_layers: self.obj[L].append(('#EDGE', g, edge, False))
+            for L in cu_layers: self.obj[L].append(('#EDGE', g, edge_clr, False))
         for net, L, g, clr in areas or []:
             self.obj[L].append((net, g, max(0.0, clr - reserve - 1e-4), False))
         self.tree_idx = {L: STRtree([o[1] for o in os_]) for L, os_ in self.obj.items()}

@@ -14,7 +14,7 @@ VIAK = float(A.get('via', 1.0)); BEND = float(A.get('bend', 0.3))
 BORDER = float(A.get('border', 1.5)); G = 0.025
 CL_T = float(A.get('drc', 0.09)); CL_P = float(A.get('drcpad', 0.10)); CL_BGA = float(A.get('drcbga', CL_P)); HOLE = float(A.get('hole_size', 0.25))
 HOLE_VIA = float(A.get('hole_via', HOLE))
-MARG = 0.02; VM = 0.005; HH = 0.2; EDGE = float(A.get('edge', 0.2))
+MARG = 0.02; VM = 0.005; HH = 0.2; EDGE = float(A.get('edge_clr', 0.2))
 RIP = box(RX0, RY0, RX1, RY1)
 def circle(c, r, q=16):
     return c.buffer(r / math.cos(math.pi / (4 * q)), q)

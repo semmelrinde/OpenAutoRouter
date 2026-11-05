@@ -441,7 +441,7 @@ def _net_graph(tracks, vias, pads_net, A, drill):
     for v in vias:
         for L in sorted({t['layer'] for t in tracks}): ends[L].append((v['x'], v['y']))
     adj = collections.defaultdict(list); pos = {}
-    def edge(a, b, Lnh, l, nv):
+    def edge_clr(a, b, Lnh, l, nv):
         adj[a].append((b, Lnh, l, nv)); adj[b].append((a, Lnh, l, nv))
     for t in tracks:
         L = t['layer']
@@ -455,7 +455,7 @@ def _net_graph(tracks, vias, pads_net, A, drill):
                 l = math.dist(p1, p2)
                 if l < 1e-9: continue
                 k1, k2 = _nodes(L, *p1), _nodes(L, *p2); pos[k1] = p1; pos[k2] = p2
-                edge(k1, k2, lp * l, l, 0)
+                edge_clr(k1, k2, lp * l, l, 0)
     cu_layers = sorted({t['layer'] for t in tracks} | {L for p in pads_net for L in p['layers'] if L in A['cu_layers']})
     for v in vias:
         ks = [_nodes(L, v['x'], v['y']) for L in cu_layers if L in A['cu_layers']]
@@ -463,7 +463,7 @@ def _net_graph(tracks, vias, pads_net, A, drill):
         for i in range(len(ks)):
             for j in range(i + 1, len(ks)):
                 h = abs(A['cu_layers'][ks[i][0]]['z'] - A['cu_layers'][ks[j][0]]['z'])
-                edge(ks[i], ks[j], via_lc(h, drill, A, 0.45)[0], h, 1)
+                edge_clr(ks[i], ks[j], via_lc(h, drill, A, 0.45)[0], h, 1)
     nodes = [k for k in pos if k[0] != 'PAD']
     kp = shapely.points([pos[k] for k in nodes]) if nodes else None
     geo = {}
@@ -475,7 +475,7 @@ def _net_graph(tracks, vias, pads_net, A, drill):
             if kp is None: continue
             d = shapely.distance(g, kp)
             for i in np.nonzero(d <= TOL)[0].tolist():
-                if nodes[i][0] == L: edge(pk, nodes[i], 0.0, 0.0, 0)
+                if nodes[i][0] == L: edge_clr(pk, nodes[i], 0.0, 0.0, 0)
 
     pl = [p for p in pads_net]
     for i, p in enumerate(pl):
@@ -486,7 +486,7 @@ def _net_graph(tracks, vias, pads_net, A, drill):
                 if a.distance(b) <= 1e-6:
                     l = math.dist((p['x'], p['y']), (q['x'], q['y']))
                     w = max(0.2, min(a.bounds[2] - a.bounds[0], a.bounds[3] - a.bounds[1]))
-                    edge(('PAD', p['ref'], p['num']), ('PAD', q['ref'], q['num']), l_plane(A, L, w) * l, l, 0); break
+                    edge_clr(('PAD', p['ref'], p['num']), ('PAD', q['ref'], q['num']), l_plane(A, L, w) * l, l, 0); break
     return adj, pos
 
 

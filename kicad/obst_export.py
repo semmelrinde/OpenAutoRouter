@@ -49,6 +49,18 @@ for f in b.GetFootprints():
         for k in range(o.OutlineCount()):
             ol = o.Outline(k); pts = [[mm(ol.CPoint(i).x), mm(ol.CPoint(i).y)] for i in range(ol.PointCount())]
             out['keepouts'].append(dict(tracks=z.GetDoNotAllowTracks(), vias=z.GetDoNotAllowVias(), layers=[LAY[L] for L in LAY if z.IsOnLayer(L)], poly=pts))
+if 'zone_list=1' in sys.argv[7:]:
+    out['zone_list'] = []
+    for z in b.Zones():
+        if z.GetIsRuleArea(): continue
+        for L, nm in LAY.items():
+            if not z.IsOnLayer(L) or not z.HasFilledPolysForLayer(L): continue
+            fp = z.GetFilledPolysList(L)
+            for k in range(fp.OutlineCount()):
+                o = fp.Outline(k); pts = [[mm(o.CPoint(i).x), mm(o.CPoint(i).y)] for i in range(o.PointCount())]
+                if max(q[0] for q in pts) < X0 - 1 or min(q[0] for q in pts) > X1 + 1 or max(q[1] for q in pts) < Y0 - 1 or min(q[1] for q in pts) > Y1 + 1: continue
+                hl = [[[mm(h.CPoint(i).x), mm(h.CPoint(i).y)] for i in range(h.PointCount())] for h in (fp.Hole(k, j) for j in range(fp.HoleCount(k)))]
+                out['zone_list'].append(dict(net=z.GetNetname(), layer=nm, outer=pts, holes=hl))
 
 edge = pcbnew.SHAPE_POLY_SET(); b.GetBoardPolygonOutlines(edge, True)
 def ring(o): return [[mm(o.CPoint(i).x), mm(o.CPoint(i).y)] for i in range(o.PointCount())]

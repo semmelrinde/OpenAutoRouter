@@ -82,15 +82,15 @@ def solve(w, s, h, t, er, er_m=3.8, c_sub=0.025, c_tr=0.012, g=None, mode='odd',
     ay = 0.5*(F[:-1, :] + F[1:, :]) / dy[None, :]
     vacant = ~pinned; idx = -np.ones((nx, ny), int); idx[vacant] = np.arange(vacant.sum()); n = vacant.sum()
     diag = np.zeros((nx, ny)); b = np.zeros(n); R = []; Cc = []; Vv = []
-    def edge(i0, j0, i1, j1, a):
+    def edge_clr(i0, j0, i1, j1, a):
         f0 = vacant[i0, j0]; f1 = vacant[i1, j1]
         np.add.at(diag, (i0[f0], j0[f0]), a[f0]); np.add.at(diag, (i1[f1], j1[f1]), a[f1])
         m = f0 & f1
         R.extend([idx[i0, j0][m], idx[i1, j1][m]]); Cc.extend([idx[i1, j1][m], idx[i0, j0][m]]); Vv.extend([-a[m], -a[m]])
         m2 = f0 & ~f1; np.add.at(b, idx[i0, j0][m2], a[m2]*V[i1, j1][m2])
         m3 = ~f0 & f1; np.add.at(b, idx[i1, j1][m3], a[m3]*V[i0, j0][m3])
-    I, J = np.meshgrid(np.arange(nx - 1), np.arange(ny), indexing='ij'); edge(I, J, I + 1, J, ax)
-    I, J = np.meshgrid(np.arange(nx), np.arange(ny - 1), indexing='ij'); edge(I, J, I, J + 1, ay)
+    I, J = np.meshgrid(np.arange(nx - 1), np.arange(ny), indexing='ij'); edge_clr(I, J, I + 1, J, ax)
+    I, J = np.meshgrid(np.arange(nx), np.arange(ny - 1), indexing='ij'); edge_clr(I, J, I, J + 1, ay)
     R.append(idx[vacant]); Cc.append(idx[vacant]); Vv.append(diag[vacant])
     A = sp.csc_matrix((np.concatenate(Vv), (np.concatenate(R), np.concatenate(Cc))), shape=(n, n))
     phi = V.copy(); phi[vacant] = spl.spsolve(A, b)

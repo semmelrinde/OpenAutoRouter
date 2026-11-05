@@ -87,8 +87,12 @@ def draw(B, Rt, zone, goal, px_mm=40, border=2.0, max_px=1100):
     def poly(g, fill, outline=None, width=1):
         for p in getattr(g, 'geoms', [g]):
             if p.geom_type != 'Polygon' or p.is_empty: continue
-            dr.polygon([tr(q) for q in p.exterior.coords], fill=fill, outline=outline)
-            for i in p.interiors: dr.polygon([tr(q) for q in i.coords], fill=(250, 250, 247))
+
+
+            m = Image.new('L', in_.size, 0); dm = ImageDraw.Draw(m)
+            dm.polygon([tr(q) for q in p.exterior.coords], fill=fill[3] if len(fill) > 3 else 255)
+            for i in p.interiors: dm.polygon([tr(q) for q in i.coords], fill=0)
+            in_.paste(fill[:3], (0, 0), m)
             if outline: dr.line([tr(q) for q in p.exterior.coords], fill=outline, width=width)
     for o in B['outline']:
         if len(o) >= 3: dr.line([tr(q) for q in o] + [tr(o[0])], fill=(90, 90, 90), width=2)

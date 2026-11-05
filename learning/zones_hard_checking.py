@@ -108,7 +108,9 @@ def verify(B, R, K, gnd_layers=None, design_rules=None):
 
 
     ignored = {p['net'] for p in B['pads'] if p['net'] not in edited}
-    missing = unconnected_polygons(B,R,ignored) if edited else []
+
+
+    missing = unconnected_polygons(B,dict(R,zones=R.get('zones',[])+gnd_levels(B,R,K,gnd_layers,clr,border)),ignored) if edited else []
     errors += [dict(category='not_connected',net_name=n) for n in missing]
 
     router_valid = (isinstance(R.get('conflicts'),(dict,list)) and not R['conflicts']
@@ -116,3 +118,16 @@ def verify(B, R, K, gnd_layers=None, design_rules=None):
     return dict(passed=router_valid and not errors, router_valid=router_valid, faults=errors,
                 limits=limits, zones_limits=dict(zclr_mm=clr,zone_edge_mm=border), connection_checked_nets=sorted(edited),
                 hint='Polygon check with native hole contours, otherwise circle export; native DRC separately.')
+
+def gnd_levels(B, R, K, gnd_layers, clr, border):
+    from shapely.ops import unary_union
+    gnd = set(K.get('gnd') or ['GND']); net_name = sorted(gnd)[0]; out = []
+    if not gnd_layers: return out
+    outlines = unary_union([Polygon(o).buffer(0) for o in B['outline'] if len(o) >= 3]).buffer(-border, SZ.QS)
+    for L in gnd_layers:
+        foreign = unary_union([g for m, g in SZ._parts(B, R, L) if m not in gnd])
+        eben = outlines.difference(foreign.buffer(clr, SZ.QS))
+        for p in getattr(eben, 'geoms', [eben]):
+            if p.geom_type == 'Polygon' and not p.is_empty:
+                out.append(dict(net=net_name, layer=L, pts=list(p.exterior.coords), holes=[list(h.coords) for h in p.interiors], filled=True))
+    return out
