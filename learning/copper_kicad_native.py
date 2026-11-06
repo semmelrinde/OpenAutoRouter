@@ -207,12 +207,41 @@ def library_geometry(folder, B, R=None, design_rules=None):
                      max_contour_deviation_mm=max((q['contour_deviation_mm'] for q in changes), default=0), pads=changes)
 
 
+def zone_sources(zones):
+    import uuid
+    originals = {}
+    for z in zones:
+        uid = z['zone_id']
+        if uid in originals:
+            old = originals[uid]
+
+            ignore = {'pts', 'holes', 'layer'}
+            sig = lambda q: {k: v for k, v in q.items() if k not in ignore}
+            if (not z.get('native_outlines') or not old.get('native_outlines')
+                    or sig(z) != sig(old)
+                    or z['layer'] not in (z.get('native_layers') or [old['layer']])):
+                raise ValueError('Ambiguous native zone source: ' + uid)
+        else:
+            originals[uid] = z
+    result = dict(originals)
+    for uid, z in originals.items():
+        for i in range(1, len(z.get('native_outlines') or [z])):
+            derived = str(uuid.uuid5(uuid.NAMESPACE_URL, '%s:contour%d' % (uid, i)))
+            if derived in result:
+                raise ValueError('Ambiguous native zone UUID: ' + derived)
+            result[derived] = z
+    return result
+
+
 def verify(folder, B, before, after, design_rules=None, cpu_s=120):
     t0 = time.process_time()
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     child0 = usage.ru_utime + usage.ru_stime
     from common.zones import active
-    child_ceiling = 120 if active(before) or active(after) else 45
+
+
+
+    child_ceiling = cpu_s if active(before) or active(after) else 45
     def native_run(cmd, log):
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)
         used = time.process_time()-t0+usage.ru_utime+usage.ru_stime-child0
@@ -291,9 +320,11 @@ def verify(folder, B, before, after, design_rules=None, cpu_s=120):
         native = json.loads(export.read_text())
 
 
-        source_zones = {z['zone_id']:z for z in zones}
+        source_zones = zone_sources(zones)
         for z in native['zones']:
-            source = source_zones[z['zone_id']]
+            source = source_zones.get(z['zone_id'])
+            if source is None:
+                raise ValueError('Native zone origin missing: ' + str(z['zone_id']))
             if source['net'] != z['net'] or z['layer'] not in (source.get('native_layers') or [source['layer']]):
                 raise ValueError('Native zone origin not unique')
 

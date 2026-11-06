@@ -29,6 +29,11 @@ def segment_currents(B, R, K, n):
     return out, I
 
 
+def keepout_buffer(g, *args):
+    p = g.buffer(*args)
+    return p if p.is_valid else unary_union(list(getattr(p, 'geoms', [p])))
+
+
 def via_fields(B, R, RR, K, zones_out, net_list, currents, clr, contour, hole, per_ampere=4.0, n_max=40, r_field=2.5):
     d_via, b_via = SZ._via_ground(R); part = d_via + clr + .02; new = []
     cu_layers = SZ._layers(B); protection_on = SZ.track_protection_on(R)
@@ -43,7 +48,7 @@ def via_fields(B, R, RR, K, zones_out, net_list, currents, clr, contour, hole, p
         foreign = unary_union([g for L in cu_layers for m, g in SZ._parts(B, RR, L) if m != n])
         bore = unary_union([Point(v['x'], v['y']).buffer(b_via / 2, 16) for v in RR.get('vias', []) if v.get('net') != n] +
                            [Point(p['x'], p['y']).buffer(p['drill'] / 2, 16) for p in B['pads'] if p.get('drill') and p['net'] != n])
-        allowed = contour.buffer(-d_via / 2, 16).difference(foreign.buffer(d_via / 2 + clr + .003, 16)).difference(bore.buffer(b_via / 2 + hole + .003, 16))
+        allowed = contour.buffer(-d_via / 2, 16).difference(keepout_buffer(foreign, d_via / 2 + clr + .003, 16)).difference(bore.buffer(b_via / 2 + hole + .003, 16))
         mask_keepout = unary_union([SZ.mask_clearance(B, n, L, clr, 16) for L in cu_layers])
         if not mask_keepout.is_empty: allowed = allowed.difference(mask_keepout.buffer(d_via / 2, 16))
 

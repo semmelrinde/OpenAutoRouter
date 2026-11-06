@@ -2,7 +2,11 @@ import math
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.polygon import orient
-from shapely.ops import unary_union
+from shapely.ops import unary_union as _unary_union
+
+
+def unary_union(geometries):
+    return _unary_union(sorted(geometries, key=lambda g: g.wkb))
 
 
 def measure(B, R, K):

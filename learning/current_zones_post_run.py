@@ -25,7 +25,8 @@ def physics_gate(a, b):
             y=b.get('drop_per_pad_mV', {}).get(n, {}).get(p)
             if y is None or not math.isfinite(x) or not math.isfinite(y): missing.append(n+':'+p)
             elif y>x+max(1e-6,abs(x)*1e-6): worse.append(n+':'+p)
-    return dict(passed=not missing and not worse, worse=worse, missing=missing,
+
+    return dict(passed=not missing and not worse, worse=sorted(worse), missing=sorted(missing),
                 relative_tolerance=1e-6, resolution_mm=a.get('raster_mm'))
 
 

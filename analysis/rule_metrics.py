@@ -96,7 +96,13 @@ def r19_measure(B, R, K):
                 hint='Detour versus pad MST is a diagnosis, not proof of a free alternative; zones not counted.')
 
 
+def _ordering(x):
+    return json.dumps(x, sort_keys=True, default=str)
+
+
 def measure(B, R, K, gnd_layers=None, area_nets=None, measures_result=None, minimax=None, si_score=False, si_measure=False, topology_version=None, r27_diagnose=True, r44_result=None):
+
+    R = dict(R, tracks=sorted(R['tracks'], key=_ordering), vias=sorted(R['vias'], key=_ordering))
 
 
     from analysis.r44 import measure as r44_measure

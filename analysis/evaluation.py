@@ -225,6 +225,10 @@ def score_v2(E, B, R, K, dc=None):
     return sum(part_list.values()), dict(part_list=part_list, sw=sw, budget_over=over, fallback=fallback, dc={n: [round(v[0], 3), round(v[1], 3), v[2]] for n, v in sorted(dc.items())})
 
 
+def _ordering(x):
+    return json.dumps(x, sort_keys=True, default=str)
+
+
 def rate(B, R, K, ir=False, zone_list=None, v3=False, minimax=None, length_gate=False, si_score=False, si_measure=False, flow_cache=None):
     from analysis.standard import goal as default_target
     goal = default_target(K.get('specs'))
@@ -238,6 +242,9 @@ def rate(B, R, K, ir=False, zone_list=None, v3=False, minimax=None, length_gate=
     if any(z.get('r41') for z in R.get('zone_list', [])):
         R = dict(R, r41_fill_stat=dict(cut_mm2=sum((z.get('r41') or {}).get('cut_mm2', 0) for z in R['zone_list'])))
     R = unify(R)
+
+
+    R = dict(R, tracks=sorted(R['tracks'], key=_ordering), vias=sorted(R['vias'], key=_ordering))
     v3 = v3 or goal == 'minimax'
     endpoints = bool(R.get('current_shape') or str((R.get('options') or {}).get('current_fix', '0')) == '1')
     if flow_cache is None or (endpoints and not flow_cache.endpoints):

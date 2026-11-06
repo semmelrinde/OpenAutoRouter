@@ -320,7 +320,7 @@ def current_tree(tracks, vias, pads, flow, A, drill, I, graph=None):
             if m in before: continue
             before[m] = (k, resistance(kid), kid); ordering.append(m)
     bottom = collections.defaultdict(float)
-    for key, pk in pad_pts.items():
+    for key, pk in sorted(pad_pts.items()):
         if pk in before and key not in source_k: bottom[pk] += float(load.get(key, 0.0))
     for k in reversed(ordering):
         if before[k] is not None: bottom[before[k][0]] += bottom[k]

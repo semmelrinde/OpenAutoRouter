@@ -171,11 +171,12 @@ def keepout_area(r, geo):
 
 
 
+
 KPL = collections.defaultdict(list); KPLK = collections.defaultdict(list)
 for _kr, _g in KEEP:
     if _kr in fps:
         _l = affinity.translate(_g, -fps[_kr]['x'], -fps[_kr]['y'])
-        KPL[_kr].append(_l); KPLK[_kr].append(_l.buffer(-0.01))
+        KPL[_kr].append(_l); KPLK[_kr].append(_l.buffer(0.005, join_style=2))
 
 
 def kp_abs(kr, s, small=False):
@@ -203,7 +204,6 @@ def way(r, s, layer_name, ch=None):
         sc = ch[c] if ch and c in ch else layer_name[c]
         x0 += sc[0] - fps[c]['x']; y0 += sc[1] - fps[c]['y']
     return math.hypot(s[0] - x0, s[1] - y0)
-
 
 PIN_LEGAL = args.get('pin_legal', '1') == '1'
 CRYSTAL_PIN = args.get('crystal_pin', '1') == '1'
@@ -1339,9 +1339,19 @@ def legalize(islands, state, layer_name, post_pins=True):
             for k in kp_abs(r, s, small=True):
                 if bel.overlap({'F': k, 'B': k}, ignore=ign or {r})[0] > 1e-7: return True
         return False
+    if args.get('legal_rectangle', '0') == '1':
+        from placement.rectangle_prefilter import Prefilter
+        rectangle = Prefilter()
+    else:
+        rectangle = None
     def problem_g(r, s, bel):
         ign = movement_refs(r)
-        return any(problem(q, sq, bel, ign) for q, sq in with_group(r, s, layer_name).items() if q in layer_name)
+        group = with_group(r, s, layer_name)
+        if rectangle is not None and any(
+                rectangle.hits(T[q], sq, bel, ign | set(inherit.get(q, {})))
+                for q, sq in group.items() if q in layer_name):
+            return True
+        return any(problem(q, sq, bel, ign) for q, sq in group.items() if q in layer_name)
     def wander_ok(r, s):
         ch = with_group(r, s, layer_name)
         return not WW_ON or all(q in SEQUENCE or q not in WT or way(q, sq, layer_name, ch) <= WT[q]['max'] + 1e-6 for q, sq in ch.items())
@@ -1360,7 +1370,6 @@ def legalize(islands, state, layer_name, post_pins=True):
             return {side:unary_union(v) for side,v in gs.items()}
         return clearance(r,st,bel,prob,geometry=geometry if r in POWER else None,**kw)
     def compact_refit(refs, pair=False, cross_hard=False):
-
         order=sorted(refs,key=lambda r:(type_(r,'') != 'L',type_(r,'') != 'D',r))
         pf=Pairs(layer_name) if pair else None
         for _ in range(2):

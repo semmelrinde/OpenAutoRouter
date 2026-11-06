@@ -52,7 +52,7 @@ def from_row(z):
     return cur_state(e)
 
 
-def comparison(a,b, strict=False):
+def comparison(a,b, rigid=False):
     def gate_check(e): return e if e.get('version')==VERSION and 'geometric' in e else cur_state(e)
     a,b=gate_check(a),gate_check(b)
     if any(not isinstance(t.get('measurement_version'),str) or not t['measurement_version'].strip() for t in (a,b)):
@@ -73,7 +73,7 @@ def comparison(a,b, strict=False):
         if v.get('version')!=bn.get('version'):bad.append(k+':version')
     if a['is_valid'] and not b['is_valid']:bad.append('is_valid')
     if a['electrical']!='violated' and b['electrical']=='violated':bad.append('electrical')
-    if strict and not b['complete_valid']:bad.append('Mandatory evidence unknown/violated')
+    if rigid and not b['complete_valid']:bad.append('Mandatory evidence unknown/violated')
     geo_progress=False
     if not a['is_valid'] and not b['is_valid']:
         ra,rb=a.get('rank'),b.get('rank')

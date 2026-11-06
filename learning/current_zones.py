@@ -1276,7 +1276,9 @@ def verify(B, R, K, gnd_layers=None, clr=None, border=0.25):
 
 
             if g.distance(a) < min(clr_r, owned.distance(a)) - TOL: faults.append((z['net'], z['layer'], 'spacing', round(g.distance(a), 4)))
-    return faults
+
+
+    return sorted(faults)
 
 
 def main():

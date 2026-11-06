@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 
@@ -55,6 +56,13 @@ def replacement_routes(B, R, K):
 
 
 def ir_values(B, R, K, res=0.1, maps=None):
+
+
+    def ordered(obj, keys):
+        return dict(obj, **{k: sorted(obj[k], key=lambda x: json.dumps(x, sort_keys=True, default=str))
+                            for k in keys if isinstance(obj.get(k), list)})
+    B = ordered(B, ('pads', 'fps'))
+    R = ordered(R, ('tracks', 'vias', 'zones', 'zone_list', 'native_pad_geometry'))
     from common.zones import unify, board_geometry, via_geometry
     B = board_geometry(B, R)
     R = via_geometry(unify(R))

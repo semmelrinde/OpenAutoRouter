@@ -213,7 +213,7 @@ def acceptance_due():
     return time.time() - time.mktime(time.strptime(z[-1]['time_s'], '%Y-%m-%d %H:%M')) > ACCEPTANCE_DAYS * 86400
 
 
-def frozen(par, dataset='learning_curve'):
+def frozen(par, dataset='learning_curve', extra=()):
     head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=R, capture_output=True, text=True).stdout.strip()
     code = os.path.join(FOLDER, 'code', head[:12])
     if not os.path.exists(os.path.join(code, 'learning', 'learning_curve.py')):
@@ -228,7 +228,7 @@ def frozen(par, dataset='learning_curve'):
     env = dict(os.environ, LEARNING_CURVE_DATA=DATA, LEARNING_CURVE_MAIN=R, LEARNING_CURVE_HEAD=head[:7],
                AUTOROUTER_CHAMPION=snapshot['fpath'],PYTHONHASHSEED='0')
     subprocess.run([os.path.join(R, '.venv', 'bin', 'python'), os.path.join(code, 'learning', 'learning_curve.py'), 'measure',
-                    'parallel=%s' % par, 'dataset=' + dataset], cwd=code, env=env)
+                    'parallel=%s' % par, 'dataset=' + dataset, *extra], cwd=code, env=env)
 
 
 RELEVANT = ['router/', 'placement/', 'analysis/netclasses.py', 'learning/current_zones.py', 'learning/current_zones_topo.py',
@@ -253,6 +253,9 @@ def main():
     a = sys.argv[1:] or ['show']; kw = dict(x.split('=', 1) for x in a if '=' in x)
     if a[0] == 'balance':
         return balance(kw)
+    if a[0] == 'frozen':
+        frozen(kw.get('parallel', '3'), kw.get('dataset', 'learning_curve'), [x for x in a[1:] if '=' in x and x.split('=')[0] not in ('parallel', 'dataset')])
+        return
     if a[0] == 'measure':
         measure(int(kw.get('parallel', '3')), time_s=int(kw.get('time_s', '300')), it=int(kw.get('iter', '40')),
                dataset=kw.get('dataset', 'learning_curve'), goal=kw.get('goal'), budget=kw.get('budget', 'cpu'),

@@ -926,7 +926,7 @@ def task_play(out, seed, kw, lines, rnd):
             if kw.get('cost_learning', '1') != '0':
                 kwargs.setdefault('generator_version', kw.get('generator_version') or ('11' if seed % 5 == 0 else '10'))
             a = task_generate(ad, seed, goal=goal,
-                                **(dict(package=axis['package'], cu_layers=axis['cu_layers']) if axis else {}), anchor_legal=kw.get('anchor_legal', '0') == '1', potential=kw.get('potential') == '1', power_share=float(kw.get('power_share', '0')), **kwargs)
+                                **(dict(package=axis['package'], cu_layers=axis['cu_layers']) if axis else {}), anchor_legal=kw.get('anchor_legal', '0') == '1', check_anchor_space=kw.get('anchor_space', '0') == '1', potential=kw.get('potential') == '1', power_share=float(kw.get('power_share', '0')), **kwargs)
             if axis:
                 a['learn_axis'] = axis
                 json.dump(a, open(os.path.join(ad, 'task.json'), 'w'), indent=1, ensure_ascii=False)

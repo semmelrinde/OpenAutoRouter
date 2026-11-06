@@ -146,7 +146,7 @@ def analysis(tracks, vias, pads, flow, tol=0.03, graph=None, endpoints=False):
             if m in parent: continue
             parent[m] = n; pseg[m] = (kid[1], kid[2]) if kid and kid[0] == 's' else None; order.append(m)
     bottom = collections.defaultdict(float)
-    for k, pk in pad_pts.items():
+    for k, pk in sorted(pad_pts.items()):
         if pk in parent and k not in source: bottom[pk] += load.get(k, 0.0)
     width = {(ti, si): w for ti, t in enumerate(tracks) for si, w in enumerate(t['w'])}
     wmax_bottom = collections.defaultdict(float)

@@ -804,7 +804,7 @@ class Task:
                 load[k_] = round(load.get(k_, 0) + a / len(version), 4)
         return load
 
-    def write_out(self, goal, structure=False, anchor_legal=False):
+    def write_out(self, goal, structure=False, anchor_legal=False, check_anchor_space=False):
         rnd = self.rnd; os.makedirs(goal, exist_ok=True); L = self.cu_layers
         LOAD = self.load_list()
         real = self.version == REAL_VERSION
@@ -976,11 +976,16 @@ class Task:
         for p in pads:
             if p['net'] and cnt[p['net']] < 2: p['net'] = ''; p['pintype'] = ''
         nets = sorted({p['net'] for p in pads if p['net']})
-        version = self.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or real else '') + ('+r35-structure1' if structure else '')
+        version = self.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or real else '') + ('+anchor-space1' if check_anchor_space else '') + ('+r35-structure1' if structure else '')
         B = dict(src='task seed=%d (learning/tasks.py v%s)' % (self.seed, version), pads=pads, outline=outline, courtyards=crt, keepouts=keep,
                  fps=fps, via_keepout=[], nets=nets, netclass={n: 'Default' for n in nets}, net_classes={}, design={}, copper_graphic=[], cu_layers=L)
         if real:
             B.update(outline_holes=holes, edge_primitives=edges)
+        if check_anchor_space:
+            from learning.anchor_space import impossible
+            unsuitable = impossible(B)
+            if unsuitable:
+                raise GeneratorError('Task on F cannot be generated: no room beside fixed anchors for ' + ', '.join(unsuitable))
         json.dump(B, open(os.path.join(goal, 'board.json'), 'w'))
 
         fine = min([abs(a['x'] - b['x']) for t in self.part_list if 'BGA' in t['fp'] for a, b in [sorted(F[t['ref']]['pads'], key=lambda p: (p['y'], p['x']))[:2]]] or [1.0])
@@ -1060,7 +1065,7 @@ def level_axes(level, seed=1):
                 part_list=0, current_paths=0, clock=1.0, pairs=0, length_groups=0, analog=0.0)
 
 
-def generate(goal, seed=1, cu_layers=0, factor=0.0, blocks='auto', level=0.0, structure=False, axes=None, family=None, potential=False, power_share=0.0, anchor_legal=False, package=None, generator_version=None, **parameter):
+def generate(goal, seed=1, cu_layers=0, factor=0.0, blocks='auto', level=0.0, structure=False, axes=None, family=None, potential=False, power_share=0.0, anchor_legal=False, package=None, generator_version=None, check_anchor_space=False, **parameter):
     if package not in (None, 'bga', 'qfn'): raise ValueError('package=bga|qfn')
     if package and (blocks != 'auto' or power_share):
         raise ValueError('Housing axis needs auto with processor (power_share=0)')
@@ -1079,11 +1084,14 @@ def generate(goal, seed=1, cu_layers=0, factor=0.0, blocks='auto', level=0.0, st
         L = int(ax.get('cu_layers', L)); f = float(ax.get('factor', f))
     a = Task(seed, L, f, st, ax if new else None, potential=potential, package=package, generator_version=generator_version); a.build(blocks, power_share=power_share)
     if new: a.axes_complete()
-    A = a.write_out(goal, structure=structure, anchor_legal=anchor_legal)
+
+
+    check_anchor_space = bool(check_anchor_space and a.version != REAL_VERSION)
+    A = a.write_out(goal, structure=structure, anchor_legal=anchor_legal, check_anchor_space=check_anchor_space)
     if new:
         from learning.teacher import task_features, plausible
         A.update(axes={**level_axes(st, seed), 'ampere': max(A['rails_A'].values(), default=0), **ax, 'cu_layers': L, 'factor': f}, family=fam,
-                 lineage=dict(output_circuit=seed, family=fam), version=a.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or a.version == REAL_VERSION else '') + '+axes1')
+                 lineage=dict(output_circuit=seed, family=fam), version=a.version + ('+anchor-legal1' if anchor_legal else '') + ('+edge_pad1' if anchor_legal or a.version == REAL_VERSION else '') + ('+anchor-space1' if check_anchor_space else '') + '+axes1')
         B = json.load(open(os.path.join(goal, 'board.json')))
         A['mcu_ref'] = getattr(a, 'mcu_ref', None)
         A['features_task'] = task_features(A, B)
@@ -1115,7 +1123,6 @@ def real_contour(w, h):
     hole = []; radius = min(1.0,w*.018,h*.018)
     for i in range(4): arc(w*.10,h*.5,radius,i*math.pi/2,(i+1)*math.pi/2,hole)
     return [outer], [[hole]], edges
-
 
 def real_design_rules(goal, board, design_rules, task):
     from pathlib import Path

@@ -49,7 +49,7 @@ def one(goal, seed, kw):
         f = shapes(*[os.path.join(d, n) for n in ('board_placed.json', 'netclasses.json', 'routes.json', 'design_rules.json')],
                    A.get('gnd_layers') or ['In1'], style=kw.get('shaping', '45r'), log=log + '.shaping')
         t['route'] += time.time() - t0
-        with open(log, 'a') as fh: print('Shape %s: %s %s' % (f.get('style'), 'applied' if f.get('applied') else 'not applied', f.get('reason') or ''), file=fh)
+        with open(log, 'a') as fh: print('Form %s: %s %s' % (f.get('style'), 'applied' if f.get('applied') else 'not applied', f.get('reason') or ''), file=fh)
     try:
         step([os.path.join(R, 'analysis/evaluation.py'), 'board_placed.json', 'routes.json', 'netclasses.json', 'json=evaluation.json', 'image=bw'], log)
         E = json.load(open('evaluation.json'))
