@@ -56,16 +56,26 @@ class Layer:
                 self.geo.append(Point(p['x'], p['y']).buffer(p['drill'] / 2, QS)); self.net_name.append('#drill_hole'); self.pad.append(False)
         for n, L2, g in B.get('areas', ()):
             if L2 == L: self.geo.append(g); self.net_name.append(n); self.pad.append(False)
+
+
+
+        self.hole_spacing = float((R.get('options') or {}).get('hole_clr') or 0)
+        self.hole_begin = len(self.geo)
+        if self.hole_spacing > 0:
+            for p in B['pads']:
+                if not p.get('drill'): continue
+                q = [Polygon(h).buffer(0) for h in p.get('hole_polys') or [] if len(h) >= 3]
+                self.geo.append(unary_union(q) if q else Point(p['x'], p['y']).buffer(p['drill'] / 2, QS))
+                self.net_name.append(p.get('net') or '#drill_hole'); self.pad.append(False)
         self.tree_idx = STRtree(self.geo) if self.geo else None
 
     def vacant(self, g, net_name, spacing):
         if self.tree_idx is None: return True
-        wide = max(spacing, self.pad_spacing)
+        wide = max(spacing, self.pad_spacing, self.hole_spacing)
         for i in self.tree_idx.query(g.buffer(wide, 4)):
-            if self.net_name[i] != net_name and self.geo[i].distance(g) < (wide if self.pad[i] else spacing): return False
+            limit = self.hole_spacing if i >= self.hole_begin else max(spacing, self.pad_spacing) if self.pad[i] else spacing
+            if self.net_name[i] != net_name and self.geo[i].distance(g) < limit: return False
         return True
-
-
 def _bend(a, b, c):
     v1 = (a[0] - b[0], a[1] - b[1]); v2 = (c[0] - b[0], c[1] - b[1]); l1, l2 = math.hypot(*v1), math.hypot(*v2)
     if l1 < 1e-9 or l2 < 1e-9: return None
